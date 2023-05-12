@@ -23,7 +23,6 @@ import imutils
 import pygame
 import traceback
 import launchlistdownloader
-import flightclubdownloader
 from PIL import Image as PILImage, ImageTk
 from urllib.request import urlopen
 
