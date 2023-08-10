@@ -320,7 +320,7 @@ class buttons:
         except:
             self.droplist2.set('blank')
         
-        self.countdowntext = StringVar('')
+        self.countdowntext = StringVar()
         
         #self.entryBright.insert(0, trackSettings.minbright)
         self.startButton = Button(self.bottomframe, text='Start Camera', command=self.set_img_collect)
