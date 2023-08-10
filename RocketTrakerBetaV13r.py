@@ -174,7 +174,7 @@ class videotrak:
             blurred = cv2.GaussianBlur(img, (5, 5), 0)
             blurred = blurred[searchy1:int(searchy1+roiheight),searchx1:int(searchx1+roiwidth)]
             thresh = cv2.threshold(blurred, float(trackSettings.minbright), 255, cv2.THRESH_BINARY)[1]
-            cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,
+            cnts, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,
                 cv2.CHAIN_APPROX_SIMPLE)
             #cnts = cnts[0]
             cX = []
