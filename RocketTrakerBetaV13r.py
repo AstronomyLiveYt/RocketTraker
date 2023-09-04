@@ -23,6 +23,7 @@ import imutils
 import pygame
 import traceback
 import launchlistdownloader
+import flightclubdownloader
 from PIL import Image as PILImage, ImageTk
 from urllib.request import urlopen
 
@@ -174,7 +175,7 @@ class videotrak:
             blurred = cv2.GaussianBlur(img, (5, 5), 0)
             blurred = blurred[searchy1:int(searchy1+roiheight),searchx1:int(searchx1+roiwidth)]
             thresh = cv2.threshold(blurred, float(trackSettings.minbright), 255, cv2.THRESH_BINARY)[1]
-            cnts, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,
+            cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,
                 cv2.CHAIN_APPROX_SIMPLE)
             #cnts = cnts[0]
             cX = []
@@ -320,7 +321,7 @@ class buttons:
         except:
             self.droplist2.set('blank')
         
-        self.countdowntext = StringVar()
+        self.countdowntext = StringVar('')
         
         #self.entryBright.insert(0, trackSettings.minbright)
         self.startButton = Button(self.bottomframe, text='Start Camera', command=self.set_img_collect)
