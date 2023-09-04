@@ -1,0 +1,11 @@
+geocoder==1.38.1
+imutils==0.5.3
+numpy==1.19.5
+opencv_python==3.4.8.29
+pandas==1.0.1
+Pillow==7.0.0
+pyephem==3.7.7.0
+pygame==1.9.6
+pyserial==3.4
+pywin32==227
+Requests==2.28.1
