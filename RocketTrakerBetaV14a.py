@@ -1,5 +1,6 @@
 from tkinter import *
 from tkinter import filedialog
+from tkinter import ttk
 import tkinter as tk
 import ephem
 import math
@@ -13,7 +14,6 @@ import time
 import datetime
 import re
 import json
-import geocoder
 import serial
 import io
 import random
@@ -72,11 +72,28 @@ class trackSettings:
     interruptbutton = 4
     focuserbutton1 = 8
     focuserbutton2 = 9
+    spiralbutton = 10
+    lastspiralbutton = 0
     focuserCOM = 10
     focuserconnected = False
     trackingmode = 'Regular'
-
-
+    horizonaltitude = 0.0
+    spiralRadius = 0.2
+    spiralSearch = False
+    predictionLock = False
+    predictionlockbutton = 11
+    lastpredictionLockbutton = 0
+    pressure = 0.0
+    temperature = 30
+    launchtime = datetime.datetime.utcnow()
+    aggression = 1.0
+    screenshrink = 0.40
+    ASCOMFocuser = False
+    haltcompatible = False
+    focuserabsolute = False
+    maxfocuserstep = 1
+    absolutefocuser = False
+    
 class KalmanFilter:
 
     kf = cv2.KalmanFilter(4, 2)
@@ -286,13 +303,21 @@ class buttons:
             trackSettings.focuserbutton2 = int(clines[22])
             trackSettings.focuserCOM = int(clines[23])
             trackSettings.trackingmode = str(clines[24])
+            trackSettings.horizonaltitude = float(clines[25])
+            trackSettings.spiralRadius = float(clines[26])
+            trackSettings.temperature = float(clines[27])
+            trackSettings.pressure = float(clines[28])
+            trackSettings.spiralbutton = int(clines[29])
+            trackSettings.predictionlockbutton = int(clines[30])
+            trackSettings.aggression = float(clines[31])
+            trackSettings.screenshrink = float(clines[32])
             config.close()
         except Exception as e:
             print(e)
             print('Config file not present or corrupted.')
         
         try:
-            geolocation = geocoder.ip('me')
+            #geolocation = geocoder.ip('me')
             #self.entryLat.insert(0, geolocation.latlng[0])
             #self.entryLon.insert(0, geolocation.latlng[1])
             self.entryLat.insert(0, trackSettings.Lat)
@@ -304,6 +329,9 @@ class buttons:
             launchlistdownloader.get_launches()
         except:
             pass
+        
+        
+        
         launches_df = pd.read_csv('launchids.csv', sep=';', encoding="Latin-1")
         self.LAUNCHES = launches_df['name'].tolist()
         self.NET = launches_df['net'].tolist()
@@ -351,19 +379,30 @@ class buttons:
         self.launchButton = Button(self.bottomframe, text='Arm Launch Tracking', command=self.arm_launch_tracking)
         self.launchButton.grid(row=8, column = 3)
         
-        self.NETLabel = Label(self.bottomframe, text='T0 Time')
-        self.NETLabel.grid(row = 4, column = 3)
-        self.entryNET = Entry(self.bottomframe)
-        self.entryNET.grid(row = 5, column = 3)  
+        self.StartAltLabel = Label(self.bottomframe, text='Slew to Horizon Altitude')
+        self.StartAltLabel.grid(row = 4, column=2)
+        self.entryStartAlt = Entry(self.bottomframe)
+        self.entryStartAlt.grid(row=4,column=3)
+        self.StartAltButton = Button(self.bottomframe, text='Update Horizon Altitude', command=self.update_horizon_alt)
+        self.StartAltButton.grid(row=5, column = 3)     
+        self.entryStartAlt.insert(0, trackSettings.horizonaltitude)
         
-        self.reversexaxis = Checkbutton(self.bottomframe, text="Reverse Joystick X Axis", variable=self.joyxrev).grid(row=9, column = 0, sticky=W)
+        self.StartSpiralButton = Button(self.bottomframe, text='Start Spiral Search', command=self.start_spiral_search)
+        self.StartSpiralButton.grid(row=5, column = 2)     
+        
+        self.NETLabel = Label(self.bottomframe, text='T0 Time')
+        self.NETLabel.grid(row = 6, column = 3)
+        self.entryNET = Entry(self.bottomframe)
+        self.entryNET.grid(row = 7, column = 3)  
+        
+        self.reversexaxis = Checkbutton(self.bottomframe, text="Reverse Joystick X Axis", variable=self.joyxrev).grid(row=10, column = 1, sticky=W)
         self.reverseyaxis = Checkbutton(self.bottomframe, text="Reverse Joystick Y Axis", variable=self.joyyrev).grid(row=9, column = 1, sticky=W)
         self.logobservations = Checkbutton(self.bottomframe, text="Log Target Alt/Az", variable=self.logaltaz).grid(row=9, column = 2, sticky=W)
         self.logtelescopepos = Checkbutton(self.bottomframe, text="Log Telescope Alt/Az", variable=self.logtelpos).grid(row=9, column = 3, sticky=W)
-        self.recordv = Checkbutton(self.bottomframe, text="Record Video", variable=self.recordvideo).grid(row=10, column = 0, sticky=W)
+        self.recordv = Checkbutton(self.bottomframe, text="Record Video", variable=self.recordvideo).grid(row=10, column = 2, sticky=W)
         self.countdownclockchoice = Checkbutton(self.bottomframe, text="Use Countdown Clock", variable=self.usecountdown).grid(row=10, column = 3, sticky=W)
         self.HoldLabel = Label(self.bottomframe, text='Hold Rate OFF')
-        self.HoldLabel.grid(row = 10, column = 1)
+        self.HoldLabel.grid(row = 3, column = 3)
         self.ComLabel = Label(self.bottomframe, text='COM Port')
         self.ComLabel.grid(row = 2, column = 0)
         self.entryCom = Entry(self.bottomframe)
@@ -380,6 +419,13 @@ class buttons:
         
         self.textbox = Text(self.textframe, height=4, width=100)
         self.textbox.grid(row=1, column=0)
+        
+        self.AggressionScaleLabel = Label(self.bottomframe, text=str('Aggression: '+str(round(trackSettings.aggression,4))))
+        self.AggressionScaleLabel.grid(row = 9, column = 0)
+        self.aggression_scale = ttk.Scale(self.bottomframe, from_=0, to=2, orient="horizontal", command=self.aggression_changed, length=200)
+        self.aggression_scale.set(trackSettings.aggression)
+        self.aggression_scale.grid(row=10, column=0, columnspan=1, padx=7, pady=7)
+        
         try:
             self.entryCom.insert(0, clines[1])
         except:
@@ -435,18 +481,87 @@ class buttons:
         self.imageMenu.add_command(label='Rotate Image -90 Degrees', command=self.setNeg90Rotate)
         self.imageMenu.add_command(label='Rotate Image 180 Degrees', command=self.set180Rotate)
         
-        self.joystickMenu = Menu(self.menu)
-        self.menu.add_cascade(label='Joystick', menu=self.joystickMenu)
-        self.joystickMenu.add_command(label='Configure Joystick Bindings', command=self.rebindJoystick)
+        self.optionsMenu = Menu(self.menu)
+        self.menu.add_cascade(label='Options', menu=self.optionsMenu)
+        self.optionsMenu.add_command(label='Configure Joystick Bindings', command=self.rebindJoystick)
+        self.optionsMenu.add_command(label='Configure Spiral Search', command=self.configSpiral)
+        self.optionsMenu.add_command(label="Configure Focuser", command=self.configFocuser)
+        self.optionsMenu.add_command(label="Refraction", command=self.configRefraction)        
+        self.optionsMenu.add_command(label="Window Scaling", command=self.configShrinkfactor) 
         
-        self.focuserMenu = Menu(self.menu)
-        self.menu.add_cascade(label='Focuser', menu=self.focuserMenu)
-        self.focuserMenu.add_command(label="Configure Astro's Focuser", command=self.configFocuser)
+        #self.optionsMenu = Menu(self.menu)
+        #self.menu.add_cascade(label='Joystick', menu=self.optionsMenu)
+
+        
+        #self.focuserMenu = Menu(self.menu)
+        #self.menu.add_cascade(label='Focuser', menu=self.focuserMenu)
+        
         
         #Initialize T0 time in entry box
         indexnumber = self.LAUNCHES.index(self.droplist.get())
         self.entryNET.delete(0, 'end')
         self.entryNET.insert(0, self.NET[indexnumber]) 
+    
+    def configShrinkfactor(self):
+        self.shrinkwindow= Toplevel(root)
+        self.shrinkwindow.geometry("350x100")
+        self.shrinkwindow.title("Window Scaling Configuration")
+        self.shrinkLabel = Label(self.shrinkwindow, text=str('Image Based Window Scaling Factor: '+str(round(trackSettings.screenshrink,4))),font=('Arial 13'))
+        self.shrinkLabel.grid(row = 0, column = 0)
+        self.shrink_scale = ttk.Scale(self.shrinkwindow, from_=0.01, to=1, orient="horizontal", command=self.shrink_changed, length=200)
+        self.shrink_scale.set(trackSettings.screenshrink)
+        self.shrink_scale.grid(row=1, column=0, columnspan=1, padx=7, pady=7)
+    
+    def shrink_changed(self, event):
+        trackSettings.screenshrink = self.shrink_scale.get()
+        self.shrinkLabel.config(text=str('Image Based Window Scaling Factor: '+str(round(trackSettings.screenshrink,4))))
+    
+    def aggression_changed(self, event):
+        trackSettings.aggression = self.aggression_scale.get()
+        self.AggressionScaleLabel.config(text=str('Aggression: '+str(round(trackSettings.aggression,4))))
+    
+    def configRefraction(self):
+        self.refractionwindow= Toplevel(root)
+        self.refractionwindow.geometry("550x100")
+        self.refractionwindow.title("Atmospheric Refraction Correction for Predictive Tracking")
+        self.pressureLabel = Label(self.refractionwindow, text='Atmospheric Pressure in millibars (set to 0 to disable refraction): ',font=('Arial 13'))
+        self.pressureLabel.grid(row = 0, column = 0)
+        self.entryPressure = Entry(self.refractionwindow)
+        self.entryPressure.grid(row = 0, column = 1)
+        self.entryPressure.insert(0, trackSettings.pressure)
+        self.temperatureLabel = Label(self.refractionwindow, text='Temperature in Celsius: ',font=('Arial 13'))
+        self.temperatureLabel.grid(row = 1, column = 0)
+        self.entryTemperature = Entry(self.refractionwindow)
+        self.entryTemperature.grid(row = 1, column = 1)
+        self.entryTemperature.insert(0, trackSettings.temperature)
+        self.refractionapplyButton = Button(self.refractionwindow, text=str('Apply'),command = self.refractionApply,font=('Arial 13'))
+        self.refractionapplyButton.grid(row = 2, column = 0)
+    
+    def refractionApply(self):
+        trackSettings.temperature = float(self.entryTemperature.get())
+        trackSettings.pressure = float(self.entryPressure.get())
+    
+    def configSpiral(self):
+        self.spiralwindow= Toplevel(root)
+        self.spiralwindow.geometry("550x100")
+        self.spiralwindow.title("Spiral Search Configuration")
+        self.spiralLabel = Label(self.spiralwindow, text='Spiral Radius (set equal to FOV diameter in degrees): ',font=('Arial 13'))
+        self.spiralLabel.grid(row = 0, column = 0)
+        self.entrySpiral = Entry(self.spiralwindow)
+        self.entrySpiral.grid(row = 0, column = 1)
+        self.entrySpiral.insert(0, trackSettings.spiralRadius)
+        self.spiralapplyButton = Button(self.spiralwindow, text=str('Apply'),command = self.spiralApply,font=('Arial 13'))
+        self.spiralapplyButton.grid(row = 1, column = 0)
+    
+    def spiralApply(self):
+        trackSettings.spiralRadius = float(self.entrySpiral.get())
+        
+    def update_horizon_alt(self):
+        try:
+            trackSettings.horizonaltitude = float(self.entryStartAlt.get())
+            self.horizonalt = -999
+        except Exception as E:
+            print(E)
     
     def setRegularMode(self):
         trackSettings.trackingmode = 'Regular'
@@ -456,22 +571,75 @@ class buttons:
         
     def setHorizonMode(self):
         trackSettings.trackingmode = 'Horizon'
+
+    def stepApply(self):
+        trackSettings.maxfocuserstep = float(self.entryFocuserStep.get())
         
     def configFocuser(self):
         self.focuserwindow= Toplevel(root)
-        self.focuserwindow.geometry("300x300")
+        self.focuserwindow.geometry("500x300")
         self.focuserwindow.title("Focuser Configuration")
-        self.commandsLabel = Label(self.focuserwindow, text='Serial Port: ',font=('Arial 14 bold'))
-        self.commandsLabel.grid(row = 0, column = 0)
+        self.commandsLabel = Label(self.focuserwindow, text="Astro's Focuser Serial Port: ",font=('Arial 10'))
+        self.commandsLabel.grid(row = 3, column = 0)
+        self.entryFocuserStep = Entry(self.focuserwindow)
+        self.entryFocuserStep.grid(row = 0, column = 1)
+        self.entryFocuserStep.insert(0, trackSettings.maxfocuserstep)
+        self.stepLabel = Label(self.focuserwindow, text="ASCOM Focuser Step Size: ",font=('Arial 10'))
+        self.stepLabel.grid(row = 0, column = 0)
         self.entryFocuserCom = Entry(self.focuserwindow)
-        self.entryFocuserCom.grid(row = 0, column = 1)
+        self.entryFocuserCom.grid(row = 3, column = 1)
+        self.stepapplyButton = Button(self.focuserwindow, text=str('Apply Focuser Step'),command = self.stepApply,font=('Arial 13'))
+        self.stepapplyButton.grid(row = 0, column = 2)
+        self.separator = ttk.Separator(self.focuserwindow, orient='horizontal')
+        self.separator.grid(row=2,columnspan=3,ipadx=0,ipady=10)
         self.entryFocuserCom.insert(0, trackSettings.focuserCOM)
         if trackSettings.focuserconnected is False:
-            self.focuserconnectButton = Button(self.focuserwindow, text=str('Connect'),command = self.connectFocuser,font=('Arial 14 bold'))
+            self.focuserconnectButton = Button(self.focuserwindow, text=str("Connect Astro's Focuser"),command = self.connectFocuser,font=('Arial 8'))
         if trackSettings.focuserconnected is True:
-            self.focuserconnectButton = Button(self.focuserwindow, text=str('Disconnect'),command = self.connectFocuser,font=('Arial 14 bold'))
-        self.focuserconnectButton.grid(row = 1, column = 1)
+            self.focuserconnectButton = Button(self.focuserwindow, text=str('Disconnect'),command = self.connectFocuser,font=('Arial 10'))
+        self.focuserconnectButton.grid(row = 3, column = 2)
+        if trackSettings.ASCOMFocuser is False:
+            self.ASCOMFocuserconnectButton = Button(self.focuserwindow, text=str('Connect ASCOM Focuser'),command = self.connectASCOMFocuser,font=('Arial 12'))
+        if trackSettings.ASCOMFocuser is True:
+            self.ASCOMFocuserconnectButton = Button(self.focuserwindow, text=str('Disconnect ASCOM Focuser'),command = self.connectASCOMFocuser,font=('Arial 12'))
+        self.ASCOMFocuserconnectButton.grid(row = 1, column = 0)
+        
     
+    def connectASCOMFocuser(self):
+        if trackSettings.ASCOMFocuser is True:
+            self.ASCOMFocuser.Connected = False
+            self.ASCOMFocuserconnectButton.configure(text='Connect ASCOM Focuser')
+            trackSettings.ASCOMFocuser = False
+        else:
+            self.fx = win32com.client.Dispatch("ASCOM.Utilities.Chooser")
+            self.fx.DeviceType = 'Focuser'
+            driverName=self.fx.Choose("None")
+            self.ASCOMFocuser=win32com.client.Dispatch(driverName)
+            self.ASCOMFocuser.Connected = True
+            self.ASCOMFocuserconnectButton.configure(text='Disconnect ASCOM Focuser')
+            trackSettings.ASCOMFocuser = True
+            try:
+                trackSettings.absolutefocuser = self.ASCOMFocuser.Absolute
+            except Exception as e:
+                print(e)
+            try:
+                self.ASCOMFocuser.Halt()
+                trackSettings.haltcompatible = True 
+            except Exception as e:
+                print(e)
+                trackSettings.haltcompatible = False
+            try:
+                trackSettings.focuserabsolute = self.ASCOMFocuser.Absolute
+            except Exception as e:
+                print(e)
+            try:
+                trackSettings.maxfocuserstep = self.ASCOMFocuser.MaxIncrement
+            except Exception as e:
+                print(e)
+                trackSettings.maxfocuserstep = self.ASCOMFocuser.MaxStep
+            self.entryFocuserStep.delete(0, tk.END)
+            self.entryFocuserStep.insert(0, trackSettings.maxfocuserstep)
+
     def connectFocuser(self):
         if trackSettings.focuserconnected is False:
             trackSettings.focuserCOM = self.entryFocuserCom.get()
@@ -515,6 +683,14 @@ class buttons:
         self.focuserinLabel.grid(row = 5, column = 0)
         self.focuserinConfig = Button(self.joywindow, text=str('Joystick Button '+str(trackSettings.focuserbutton2)),command = self.bindfocuserbutton2)
         self.focuserinConfig.grid(row = 5, column = 1)
+        self.spiralbuttonlabel = Label(self.joywindow, text='Spiral Search: ')
+        self.spiralbuttonlabel.grid(row = 6, column = 0)
+        self.spiralbuttonConfig = Button(self.joywindow, text=str('Joystick Button '+str(trackSettings.spiralbutton)),command = self.bindspiralbutton)
+        self.spiralbuttonConfig.grid(row = 6, column = 1)
+        self.predictionbuttonlabel = Label(self.joywindow, text='Prediction Lock: ')
+        self.predictionbuttonlabel.grid(row = 7, column = 0)
+        self.predictionbuttonConfig = Button(self.joywindow, text=str('Joystick Button '+str(trackSettings.predictionlockbutton)),command = self.bindpredictionbutton)
+        self.predictionbuttonConfig.grid(row = 7, column = 1)
         
     def bindfocuserbutton1(self):
         if len(self.joysticks) == 0:
@@ -650,7 +826,61 @@ class buttons:
                         break
                 time.sleep(0.1)
             self.pushabuttonwindow.destroy()
-        
+
+    def bindspiralbutton(self):
+        if len(self.joysticks) == 0:
+            print('Connect Joystick And Restart Program!')
+            self.textbox.insert(END, 'Connect Joystick And Restart Program!\n')
+            self.textbox.see('end')
+        else:
+            self.joysticks[0].init()
+            buttoncount = self.joysticks[0].get_numbuttons()
+            self.pushabuttonwindow= Toplevel(self.joywindow)
+            self.pushabuttonwindow.geometry("250x150")
+            self.pushabuttonwindow.title("Listening")
+            self.pushabuttonLabel = Label(self.pushabuttonwindow, text='Push a Joystick Button')
+            self.pushabuttonLabel.grid(row = 0, column = 0)
+            buttonconfigured = False
+            while buttonconfigured is False:
+                pygame.event.pump()
+                for b in range(0,buttoncount):
+                    p = self.joysticks[0].get_button(b)
+                    if p > 0:
+                        print(b)
+                        trackSettings.spiralbutton = b
+                        self.spiralbuttonConfig.configure(text=str('Joystick Button '+str(trackSettings.spiralbutton)))
+                        buttonconfigured = True
+                        break
+                time.sleep(0.1)
+            self.pushabuttonwindow.destroy()
+            
+    def bindpredictionbutton(self):
+        if len(self.joysticks) == 0:
+            print('Connect Joystick And Restart Program!')
+            self.textbox.insert(END, 'Connect Joystick And Restart Program!\n')
+            self.textbox.see('end')
+        else:
+            self.joysticks[0].init()
+            buttoncount = self.joysticks[0].get_numbuttons()
+            self.pushabuttonwindow= Toplevel(self.joywindow)
+            self.pushabuttonwindow.geometry("250x150")
+            self.pushabuttonwindow.title("Listening")
+            self.pushabuttonLabel = Label(self.pushabuttonwindow, text='Push a Joystick Button')
+            self.pushabuttonLabel.grid(row = 0, column = 0)
+            buttonconfigured = False
+            while buttonconfigured is False:
+                pygame.event.pump()
+                for b in range(0,buttoncount):
+                    p = self.joysticks[0].get_button(b)
+                    if p > 0:
+                        print(b)
+                        trackSettings.predictionlockbutton = b
+                        self.predictionbuttonConfig.configure(text=str('Joystick Button '+str(trackSettings.predictionlockbutton)))
+                        buttonconfigured = True
+                        break
+                time.sleep(0.1)
+            self.pushabuttonwindow.destroy()
+
     def set_crosshair(self):
         trackSettings.crosshairX = trackSettings.mainviewX
         trackSettings.crosshairY = trackSettings.mainviewY        
@@ -806,11 +1036,41 @@ class buttons:
         config.write(str(trackSettings.focuserbutton2) + '\n')
         config.write(str(trackSettings.focuserCOM) + '\n')
         config.write(str(trackSettings.trackingmode) + '\n')
+        config.write(str(trackSettings.horizonaltitude) + '\n')
+        config.write(str(trackSettings.spiralRadius) + '\n')
+        config.write(str(trackSettings.temperature) + '\n')
+        config.write(str(trackSettings.pressure) + '\n')
+        config.write(str(trackSettings.spiralbutton) + '\n')
+        config.write(str(trackSettings.predictionlockbutton) + '\n')
+        config.write(str(trackSettings.aggression) + '\n')
+        config.write(str(trackSettings.screenshrink) + '\n')
         config.close()
         if self.recordvideo.get() == 1:
             self.out.release()
         sys.exit()
-
+    
+    def start_spiral_search(self):
+        if trackSettings.spiralSearch is False:
+            self.currentspiraldegree = 0
+            self.currentspiralradius = trackSettings.spiralRadius/3
+            trackSettings.spiralSearch = True
+            trackSettings.predictionLock = False
+            self.StartSpiralButton.configure(text='Stop Spiral Search')
+        elif trackSettings.spiralSearch is True:
+            trackSettings.spiralSearch = False
+            self.StartSpiralButton.configure(text='Start Spiral Search')
+            
+    def start_prediction_lock(self):
+        if trackSettings.predictionLock is False:
+            trackSettings.spiralSearch = False
+            self.StartSpiralButton.configure(text='Prediction Lock ON')
+            self.lastpredictiontime = datetime.datetime.utcnow()
+            self.azdifflist = []
+            self.altdifflist = []
+            trackSettings.predictionLock = True
+        elif trackSettings.predictionLock is True:
+            trackSettings.predictionLock = False
+            self.StartSpiralButton.configure(text='Start Spiral Search')
     
     def start_launch_simulation(self):
         if trackSettings.runningsimulation is False and trackSettings.runninglaunch is False:
@@ -861,6 +1121,13 @@ class buttons:
             trackSettings.feedingdata = False
             self.launchButton.configure(text='Arm Launch Tracking')
     
+    def atm_refraction(self, altitude):
+        if altitude>15:
+            refraction = 0.00452*trackSettings.pressure*math.tan(math.radians((90-altitude)/(273+trackSettings.temperature)))
+        else:
+            refraction = (trackSettings.pressure*(0.1594+(0.0196*altitude)+(0.00002*altitude**2)))/((273+trackSettings.temperature)*(1+(0.505*altitude)+(0.0845*altitude**2)))
+        return(refraction)
+        
     def run_launch(self):
         self.t0 = self.entryNET.get()
         self.t0 = datetime.datetime.strptime(self.t0, '%Y-%m-%dT%H:%M:%SZ')
@@ -910,8 +1177,11 @@ class buttons:
                 except:
                     pass
         initialtime = datetime.datetime.utcnow()
+        trackSettings.launchtime = initialtime
         endoffile = False
         timedeltalast = 0
+        self.lastaz = self.tel.Azimuth
+        self.lastalt = self.tel.Altitude
         ####Do this if we're set to wait at the horizon mode###
         if trackSettings.trackingmode == 'Horizon':
             if trackSettings.fileSelected is True:
@@ -920,16 +1190,21 @@ class buttons:
                 azlist1 = []
                 timelist = []
                 ####################NEED TO LOCATE WHERE IT WILL HIT THE HORIZON AND WAIT THERE!
-                horizonalt = -999
+                self.horizonalt = -999
                 horizonaz = -999
                 waittime = 0
                 for index, row in df.iterrows():
                     timelist.append(row['time'])
                     #Find the row that it rises on horizon and slew there
-                    if row['elevationDegs'] > 0 and horizonalt < -990:
+                    rowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(rowalt)
+                    rowalt = rowalt+refraction
+                    if rowalt > trackSettings.horizonaltitude and self.horizonalt < -990:
                         waittime = row['time']
                         startgoingtime = initialtime + datetime.timedelta(seconds=waittime)
-                        horizonalt = row['elevationDegs']
+                        thisrowalt = float(row['elevationDegs'])
+                        refraction = self.atm_refraction(thisrowalt)
+                        self.horizonalt = thisrowalt+refraction
                         horizonaz = row['azimuthDegs']
                         #Slew to pad location
                         launchobserver = ephem.Observer()
@@ -938,11 +1213,16 @@ class buttons:
                         launchobserver.date = datetime.datetime.utcnow()
                         launchobserver.pressure = 0
                         launchobserver.epoch = launchobserver.date
-                        raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(horizonalt))
+                        raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
+                        self.textbox.insert(END, str('Slew Alt: ' + str(round(self.horizonalt,2)) + ' Slew Az: ' + str(round(horizonaz,2)) +' Slew RA: ' + str(round((math.degrees(raslew)/15),2))+' hrs Slew Dec: ' + str(round(math.degrees(decslew),2))+'\n'))
+                        self.textbox.see('end')
                         self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
                         self.tel.MoveAxis(0, 0)
                         self.tel.MoveAxis(1, 0)
-                    altlist1.append(row['elevationDegs'])
+                    thisrowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(thisrowalt)
+                    thisrowalt = thisrowalt+refraction
+                    altlist1.append(thisrowalt)
                     azlist1.append(row['azimuthDegs'])
                 altlast = altlist1[0]
                 azlast = azlist1[0]
@@ -953,7 +1233,10 @@ class buttons:
                 r, c = df.shape
                 currenttime = datetime.datetime.utcnow()
                 if currenttime > startgoingtime:
+                    launchobserver.date = datetime.datetime.utcnow()
                     timedelta = (currenttime - initialtime).total_seconds()
+                    onesecondlater = ((currenttime - initialtime).total_seconds()+1)
+                    twosecondslater = onesecondlater+1
                     hours = timedelta // 3600
                     minutes = (timedelta % 3600) // 60
                     seconds = timedelta % 60
@@ -962,21 +1245,77 @@ class buttons:
                     timedeltalast = timedelta
                     df_sort = df.iloc[(df['time']-timedelta).abs().argsort()[:2]]
                     df_sort = df_sort.sort_values(by=['time'])
+                    #Find the row exactly 1 second later to be able to compute degrees per second
+                    df_sort2 = df.iloc[(df['time']-onesecondlater).abs().argsort()[:2]]
+                    df_sort2 = df_sort2.sort_values(by=['time'])
+                    df_sort3 = df.iloc[(df['time']-twosecondslater).abs().argsort()[:2]]
+                    df_sort3 = df_sort3.sort_values(by=['time'])
                     altlist1 = []
                     azlist1 = []
                     timelist = []
                     #Convert absolute coordinates to relative rates
                     index = 0
-                    predictedalt = df_sort.iloc[index].loc['elevationDegs']
-                    predictedaz = df_sort.iloc[index].loc['azimuthDegs']
-                    altrate = df_sort.iloc[index+1].loc['elevationDegs'] - df_sort.iloc[index].loc['elevationDegs']
-                    headingeast = ((df_sort.iloc[index+1].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])
-                    headingwest = (df_sort.iloc[index+1].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))
-                    azrate = df_sort.iloc[index+1].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs']
+                    predictedalt = float(df_sort.iloc[index].loc['elevationDegs'])
+                    refraction = self.atm_refraction(predictedalt)
+                    predictedalt = predictedalt+refraction
+                    predictedaz = float(df_sort.iloc[index].loc['azimuthDegs'])
+                    nextpredictedalt = float(df_sort2.iloc[index].loc['elevationDegs'])
+                    nextrefraction = self.atm_refraction(nextpredictedalt)
+                    nextpredictedalt = nextpredictedalt+nextrefraction
+                    thirdpredictedalt = float(df_sort3.iloc[index].loc['elevationDegs'])
+                    thirdrefraction = self.atm_refraction(thirdpredictedalt)
+                    thirdpredictedalt = thirdpredictedalt+thirdrefraction
+                    nextpredictedaz = float(df_sort2.iloc[index].loc['azimuthDegs'])
+                    thirdpredictedaz = float(df_sort3.iloc[index].loc['azimuthDegs'])
+                    currentpredicttime = float(df_sort.iloc[index].loc['time'])
+                    nextpredicttime = float(df_sort2.iloc[index].loc['time'])
+                    thirdpredicttime = float(df_sort3.iloc[index].loc['time'])
+                    altrate = nextpredictedalt - predictedalt
+                    nextaltrate = thirdpredictedalt - nextpredictedalt
+                    #Now I'm using df_sort2 as index+1 because df_sort2 actually finds the closest value to 1 second later, the next row of df_sort isn't NECESSARILY one second later
+                    headingeast = ((df_sort2.iloc[index].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])
+                    headingwest = (df_sort2.iloc[index].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))
+                    nextheadingeast = ((df_sort3.iloc[index].loc['azimuthDegs'] + 360)-df_sort2.iloc[index].loc['azimuthDegs'])
+                    nextheadingwest = (df_sort3.iloc[index].loc['azimuthDegs'] - (df_sort2.iloc[index].loc['azimuthDegs']+360))
+                    azrate = df_sort2.iloc[index].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs']
+                    nextazrate = thirdpredictedaz - nextpredictedaz
+                    if abs(nextheadingeast) < abs(nextazrate):
+                        nextazrate = nextheadingeast
+                    elif abs(nextheadingwest) < abs(nextazrate):
+                        nextazrate = nextheadingwest      
                     if abs(headingeast) < abs(azrate):
                         azrate = headingeast
                     elif abs(headingwest) < abs(azrate):
                         azrate = headingwest      
+                    #Interpolate current alt and az rates!
+                    altrate = altrate + (timedelta-currentpredicttime)*((nextaltrate-altrate)/(nextpredicttime-currentpredicttime))
+                    azrate = azrate + (timedelta-currentpredicttime)*((nextazrate-azrate)/(nextpredicttime-currentpredicttime))
+                    #Check if we're doing a spiral search and update the spiral vector if so#############################################
+                    if trackSettings.joystickconnected is False:
+                        joyspiral = self.joysticks[0].get_button(trackSettings.spiralbutton)
+                    else:
+                    #PLACEHOLDER UNTIL I UPDATE THE REMOTE JOY SERVER TO HAVE A SPIRAL BUTTON
+                        joyspiral = 0
+                    if joyspiral == 1 and trackSettings.lastspiralbutton == 0:
+                        self.start_spiral_search()
+                        trackSettings.lastspiralbutton = 1
+                    elif joyspiral == 0 and trackSettings.lastspiralbutton == 1:
+                        trackSettings.lastspiralbutton = 0
+                    if trackSettings.spiralSearch is True:
+                        circlecircumference = 2*math.pi*self.currentspiralradius
+                        amounttorotate = (((trackSettings.spiralRadius/circlecircumference)*360)*timedelta2)
+                        #amounttoextend = (trackSettings.spiralRadius/(360/amounttorotate))*timedelta2
+                        self.currentspiraldegree += amounttorotate
+                        if self.currentspiraldegree > 360:
+                            self.currentspiraldegree -= 360
+                            self.currentspiralradius += trackSettings.spiralRadius
+                        altpoint = self.currentspiralradius * math.sin(math.radians(self.currentspiraldegree))
+                        azpoint = (self.currentspiralradius * math.cos(math.radians(self.currentspiraldegree)))*(1/math.cos(math.radians(predictedalt)))
+                        altpoint = predictedalt + altpoint
+                        azpoint = predictedaz + azpoint
+                        self.spiralalt, self.spiralaz = altpoint, azpoint
+                        #print(predictedalt, predictedaz, altpoint, azpoint)
+                        #print(self.currentspiraldegree, self.currentspiralradius)
                     #These should be the absolute coordinates but just store relative rates for now
                     alt = altrate
                     az = azrate
@@ -988,7 +1327,7 @@ class buttons:
                     elif self.remotejoybutton3 > 0:
                         timedelta = r+1
                     #check to see if we reached the end of the interpolation, remember to account for extra 20 seconds before launch)
-                    if timedelta > (r):
+                    if (timedelta+2) > (r):
                         endoffile = True
                         trackSettings.runninglaunch = False
                         trackSettings.buttonpushed = False
@@ -1002,7 +1341,7 @@ class buttons:
                         pass
                     else:
                         #print(timedelta, alt, az, altrate, azrate)
-                        self.timedeltaout, self.altout, self.azout, self.altrateout, self.azrateout, self.predictalt, self.predictaz = timedelta, alt, az, altrate, azrate, predictedalt, predictedaz
+                        self.timedeltaout, self.altout, self.azout, self.altrateout, self.azrateout, self.predictalt, self.predictaz, self.nextpredictedalt, self.nextpredictedaz, self.currentpredicttime, self.nextpredicttime, self.thirdpredictedalt, self.thirdpredictedaz, self.thirdpredicttime = timedelta, alt, az, altrate, azrate, predictedalt, predictedaz, nextpredictedalt, nextpredictedaz, currentpredicttime, nextpredicttime, thirdpredictedalt, thirdpredictedaz, thirdpredicttime
                         trackSettings.feedingdata = True
                 else:
                     timedelta = (startgoingtime - currenttime).total_seconds()
@@ -1017,6 +1356,46 @@ class buttons:
                     else:
                         if self.remotejoybutton2 > 0:
                             startgoingtime = currenttime
+                    if self.horizonalt < -990:
+                        #Slew to new waiting spot and get new startgoing time
+                        df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
+                        altlist1 = []
+                        azlist1 = []
+                        timelist = []
+                        horizonaz = -999
+                        waittime = 0
+                        for index, row in df.iterrows():
+                            timelist.append(row['time'])
+                            #Find the row that it rises on horizon and slew there
+                            rowalt = float(row['elevationDegs'])
+                            refraction = self.atm_refraction(rowalt)
+                            rowalt = rowalt+refraction
+                            if rowalt > trackSettings.horizonaltitude and self.horizonalt < -990:
+                                waittime = row['time']
+                                startgoingtime = initialtime + datetime.timedelta(seconds=waittime)
+                                thisrowalt = float(row['elevationDegs'])
+                                refraction = self.atm_refraction(thisrowalt)
+                                self.horizonalt = thisrowalt+refraction
+                                horizonaz = row['azimuthDegs']
+                                #Slew to pad location
+                                launchobserver = ephem.Observer()
+                                launchobserver.lat = (str(self.entryLat.get()))
+                                launchobserver.lon = (str(self.entryLon.get()))
+                                launchobserver.date = datetime.datetime.utcnow()
+                                launchobserver.pressure = 0
+                                launchobserver.epoch = launchobserver.date
+                                raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
+                                self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+                                self.tel.MoveAxis(0, 0)
+                                self.tel.MoveAxis(1, 0)
+                            thisrowalt = float(row['elevationDegs'])
+                            refraction = self.atm_refraction(thisrowalt)
+                            thisrowalt = thisrowalt+refraction
+                            altlist1.append(thisrowalt)
+                            azlist1.append(row['azimuthDegs'])
+                        altlast = altlist1[0]
+                        azlast = azlist1[0]
+                        
         ###Do this if we're set to adaptive tracking mode###
         elif trackSettings.trackingmode == 'Adaptive':
             if trackSettings.fileSelected is True:
@@ -1029,11 +1408,21 @@ class buttons:
                 r, c = df.shape
                 for index, row in df.iterrows():
                     timelist.append(row['time'])
-                    altlist1.append(row['elevationDegs'])
+                    thisrowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(thisrowalt)
+                    thisrowalt = thisrowalt+refraction
+                    altlist1.append(thisrowalt)
                     azlist1.append(row['azimuthDegs'])
                     #Pre-Calculate rates
                     if (index+2)<r:
-                        altrate = df.iloc[index+1].loc['elevationDegs'] - df.iloc[index].loc['elevationDegs']
+                        predictedalt = float(df.iloc[index].loc['elevationDegs'])
+                        refraction = self.atm_refraction(predictedalt)
+                        predictedalt = predictedalt+refraction
+                        predictedaz = float(df.iloc[index].loc['azimuthDegs'])
+                        nextpredictedalt = float(df.iloc[index+1].loc['elevationDegs'])
+                        nextrefraction = self.atm_refraction(nextpredictedalt)
+                        nextpredictedalt = nextpredictedalt+nextrefraction
+                        altrate = nextpredictedalt - predictedalt
                         headingeast = ((df.iloc[index+1].loc['azimuthDegs'] + 360)-df.iloc[index].loc['azimuthDegs'])
                         headingwest = (df.iloc[index+1].loc['azimuthDegs'] - (df.iloc[index].loc['azimuthDegs']+360))
                         azrate = df.iloc[index+1].loc['azimuthDegs'] - df.iloc[index].loc['azimuthDegs']
@@ -1091,7 +1480,10 @@ class buttons:
                 currentalt = self.tel.Altitude
                 try:
                     for index, row in df.iterrows():
-                        currentdiff = math.sqrt(abs(row['elevationDegs']-currentalt)**2+abs(row['azimuthDegs']-currentaz)**2)+(abs(row['time']-currentindex))
+                        thisrowalt = float(row['elevationDegs'])
+                        refraction = self.atm_refraction(thisrowalt)
+                        thisrowalt = thisrowalt+refraction
+                        currentdiff = math.sqrt(abs(thisrowalt-currentalt)**2+abs(row['azimuthDegs']-currentaz)**2)+(abs(row['time']-currentindex))
                         if currentdiff < mindiff:
                             mindiff = currentdiff
                             mindiffindex = index
@@ -1152,7 +1544,10 @@ class buttons:
                 timelist = []
                 for index, row in df.iterrows():
                     timelist.append(row['time'])
-                    altlist1.append(row['elevationDegs'])
+                    thisrowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(thisrowalt)
+                    thisrowalt = thisrowalt+refraction
+                    altlist1.append(thisrowalt)
                     azlist1.append(row['azimuthDegs'])
                 altlast = altlist1[0]
                 azlast = azlist1[0]
@@ -1176,14 +1571,23 @@ class buttons:
                 timelist = []
                 #Convert absolute coordinates to relative rates
                 index = 0
-                altrate = df_sort.iloc[index+1].loc['elevationDegs'] - df_sort.iloc[index].loc['elevationDegs']
+                predictedalt = float(df_sort.iloc[index].loc['elevationDegs'])
+                refraction = self.atm_refraction(predictedalt)
+                predictedalt = predictedalt+refraction
+                predictedaz = float(df_sort.iloc[index].loc['azimuthDegs'])
+                nextpredictedalt = float(df_sort.iloc[index+1].loc['elevationDegs'])
+                nextrefraction = self.atm_refraction(nextpredictedalt)
+                nextpredictedalt = nextpredictedalt+nextrefraction
+                altrate = nextpredictedalt - predictedalt
+                predictedaz = df_sort.iloc[index].loc['azimuthDegs']
+                #altrate = df_sort.iloc[index+1].loc['elevationDegs'] - df_sort.iloc[index].loc['elevationDegs']
                 headingeast = ((df_sort.iloc[index+1].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])
                 headingwest = (df_sort.iloc[index+1].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))
                 azrate = df_sort.iloc[index+1].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs']
                 if abs(headingeast) < abs(azrate):
                     azrate = headingeast
                 elif abs(headingwest) < abs(azrate):
-                    azrate = headingwest      
+                    azrate = headingwest                    
                 #These should be the absolute coordinates but just store relative rates for now
                 alt = altrate
                 az = azrate
@@ -1224,7 +1628,10 @@ class buttons:
             timelist = []
             for index, row in df.iterrows():
                 timelist.append(row['time'])
-                altlist1.append(row['elevationDegs'])
+                thisrowalt = float(row['elevationDegs'])
+                refraction = self.atm_refraction(thisrowalt)
+                thisrowalt = thisrowalt+refraction
+                altlist1.append(thisrowalt)
                 azlist1.append(row['azimuthDegs'])
             altlast = altlist1[0]
             azlast = azlist1[0]
@@ -1244,9 +1651,14 @@ class buttons:
             timelist = []
             #Convert absolute coordinates to relative rates
             index = 0
-            predictedalt = df_sort.iloc[index].loc['elevationDegs']
+            predictedalt = float(df_sort.iloc[index].loc['elevationDegs'])
+            refraction = self.atm_refraction(predictedalt)
+            predictedalt = predictedalt+refraction
             predictedaz = df_sort.iloc[index].loc['azimuthDegs']
-            altrate = df_sort.iloc[index+1].loc['elevationDegs'] - df_sort.iloc[index].loc['elevationDegs']
+            nextpredictedalt = float(df_sort.iloc[index+1].loc['elevationDegs'])
+            nextrefraction = self.atm_refraction(nextpredictedalt)
+            nextpredictedalt = nextpredictedalt+nextrefraction
+            altrate = nextpredictedalt - predictedalt
             headingeast = ((df_sort.iloc[index+1].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])
             headingwest = (df_sort.iloc[index+1].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))
             azrate = df_sort.iloc[index+1].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs']
@@ -1308,6 +1720,13 @@ class buttons:
         commandedaltratelast = 0
         commandedazratelast = 0
         firstslew = True
+        launchobserver = ephem.Observer()
+        launchobserver.lat = (str(self.entryLat.get()))
+        launchobserver.lon = (str(self.entryLon.get()))
+        launchobserver.date = datetime.datetime.utcnow()
+        launchobserver.pressure = 0
+        launchobserver.elevation = 0
+        launchobserver.epoch = launchobserver.date
         while trackSettings.feedingdata is False:
             time.sleep(0.001)
         while trackSettings.joytracking is False and trackSettings.feedingdata is True:
@@ -1344,6 +1763,29 @@ class buttons:
                                         self.focuserSerial.write(b'stopbutton\n')
                                 except Exception as e:
                                     print(e)
+                            elif trackSettings.ASCOMFocuser is True:
+                                try:
+                                    if joyfocus1 == 1:
+                                        if trackSettings.focuserabsolute is True:
+                                            currentpos = self.ASCOMFocuser.Position
+                                            newpos = currentpos + trackSettings.maxfocuserstep
+                                            self.ASCOMFocuser.Move(newpos)
+                                        else:
+                                            self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                    elif joyfocus2 == 1:
+                                        if trackSettings.focuserabsolute is True:
+                                            currentpos = self.ASCOMFocuser.Position
+                                            newpos = currentpos - trackSettings.maxfocuserstep
+                                            self.ASCOMFocuser.Move(newpos)
+                                        else:
+                                            self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                    elif trackSettings.haltcompatible is True:
+                                        try:
+                                            self.ASCOMFocuser.Halt()
+                                        except:
+                                            pass
+                                except Exception as e:
+                                    print(e)
                         else:
                             joy0 = self.remotejoy0
                             joy1 = self.remotejoy1
@@ -1361,6 +1803,29 @@ class buttons:
                                         self.focuserSerial.write(b'button2\n')
                                     else:
                                         self.focuserSerial.write(b'stopbutton\n')
+                                elif trackSettings.ASCOMFocuser is True:
+                                    try:
+                                        if joybutton4 == 1:
+                                            if trackSettings.focuserabsolute is True:
+                                                currentpos = self.ASCOMFocuser.Position
+                                                newpos = currentpos + trackSettings.maxfocuserstep
+                                                self.ASCOMFocuser.Move(newpos)
+                                            else:
+                                                self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                        elif joybutton5 == 1:
+                                            if trackSettings.focuserabsolute is True:
+                                                currentpos = self.ASCOMFocuser.Position
+                                                newpos = currentpos - trackSettings.maxfocuserstep
+                                                self.ASCOMFocuser.Move(newpos)
+                                            else:
+                                                self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                        elif trackSettings.haltcompatible is True:
+                                            try:
+                                                self.ASCOMFocuser.Halt()
+                                            except:
+                                                pass
+                                    except Exception as e:
+                                        print(e)
                             except Exception as e:
                                 print(e)
                         if joybutton == 1 and lastbutton == 0:
@@ -1441,6 +1906,29 @@ class buttons:
                                         self.focuserSerial.write(b'stopbutton\n')
                                 except Exception as e:
                                     print(e)
+                            elif trackSettings.ASCOMFocuser is True:
+                                try:
+                                    if joyfocus1 == 1:
+                                        if trackSettings.focuserabsolute is True:
+                                            currentpos = self.ASCOMFocuser.Position
+                                            newpos = currentpos + trackSettings.maxfocuserstep
+                                            self.ASCOMFocuser.Move(newpos)
+                                        else:
+                                            self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                    elif joyfocus2 == 1:
+                                        if trackSettings.focuserabsolute is True:
+                                            currentpos = self.ASCOMFocuser.Position
+                                            newpos = currentpos - trackSettings.maxfocuserstep
+                                            self.ASCOMFocuser.Move(newpos)
+                                        else:
+                                            self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                    elif trackSettings.haltcompatible is True:
+                                        try:
+                                            self.ASCOMFocuser.Halt()
+                                        except:
+                                            pass
+                                except Exception as e:
+                                    print(e)
                         else:
                             joy0 = self.remotejoy0
                             joy1 = self.remotejoy1
@@ -1458,6 +1946,29 @@ class buttons:
                                         self.focuserSerial.write(b'button2\n')
                                     else:
                                         self.focuserSerial.write(b'stopbutton\n')
+                                elif trackSettings.ASCOMFocuser is True:
+                                    try:
+                                        if joybutton4 == 1:
+                                            if trackSettings.focuserabsolute is True:
+                                                currentpos = self.ASCOMFocuser.Position
+                                                newpos = currentpos + trackSettings.maxfocuserstep
+                                                self.ASCOMFocuser.Move(newpos)
+                                            else:
+                                                self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                        elif joybutton5 == 1:
+                                            if trackSettings.focuserabsolute is True:
+                                                currentpos = self.ASCOMFocuser.Position
+                                                newpos = currentpos - trackSettings.maxfocuserstep
+                                                self.ASCOMFocuser.Move(newpos)
+                                            else:
+                                                self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                        elif trackSettings.haltcompatible is True:
+                                            try:
+                                                self.ASCOMFocuser.Halt()
+                                            except:
+                                                pass
+                                    except Exception as e:
+                                        print(e)
                             except Exception as e:
                                 print(e)
                         if joybutton == 1 and lastbutton == 0:
@@ -1470,8 +1981,93 @@ class buttons:
                             lastbutton = 1
                         if joybutton == 0 and lastbutton == 1:
                             lastbutton = 0
-                        azrate = (joy0*throttle)*self.axis0rate + float(self.azrateout) + (0.000001*random.randrange(0, 5, 1))
-                        altrate = (joy1*throttle*-1)*self.axis0rate + float(self.altrateout) + (0.000001*random.randrange(0, 5, 1))
+                        #Calculate the az and alt rates differently if we need to include a spiral search or not
+                        #Check joystick first to see if we're commanded to do spiral search or alternatively lock onto prediction
+                        if trackSettings.joystickconnected is False:
+                            joyspiral = self.joysticks[0].get_button(trackSettings.spiralbutton)
+                        else:
+                        #PLACEHOLDER UNTIL I UPDATE THE REMOTE JOY SERVER TO HAVE A SPIRAL BUTTON
+                            joyspiral = 0
+                        if joyspiral == 1 and trackSettings.lastspiralbutton == 0:
+                            self.start_spiral_search()
+                            trackSettings.lastspiralbutton = 1
+                        elif joyspiral == 0 and trackSettings.lastspiralbutton == 1:
+                            trackSettings.lastspiralbutton = 0
+                                                
+                        if trackSettings.joystickconnected is False:
+                            joyprediction = self.joysticks[0].get_button(trackSettings.predictionlockbutton)
+                        else:
+                        #PLACEHOLDER UNTIL I UPDATE THE REMOTE JOY SERVER TO HAVE A PREDICTION LOCK BUTTON
+                            joyprediction = 0
+                        if joyprediction == 1 and trackSettings.lastpredictionLockbutton == 0:
+                            self.start_prediction_lock()
+                            trackSettings.lastpredictionLockbutton = 1
+                        elif joyprediction == 0 and trackSettings.lastpredictionLockbutton == 1:
+                            trackSettings.lastpredictionLockbutton = 0
+
+                        if trackSettings.spiralSearch is False:
+                            if trackSettings.predictionLock is False:
+                                azrate = (joy0*throttle)*self.axis0rate + float(self.azrateout) + (0.000001*random.randrange(0, 5, 1))
+                                altrate = (joy1*throttle*-1)*self.axis0rate + float(self.altrateout) + (0.000001*random.randrange(0, 5, 1))
+                            elif trackSettings.predictionLock is True:
+                                #Get time interval - initialize the "last time" using the "start_prediction_lock" function above
+                                currentpredictiontime = datetime.datetime.utcnow()
+                                currentalt = self.tel.Altitude
+                                currentaz = self.tel.Azimuth
+                                #Check to make sure these aren't stale coordinates from the telescope
+                                telaltmovement = abs(currentalt - self.lastalt)
+                                telazmovement = abs(currentaz - self.lastaz)
+                                staletelcoords = False
+                                if telaltmovement + telazmovement < 0.1:
+                                    #It's stale so don't make corrections, just use the current interpolated alt/az rate
+                                    azrate = float(self.azrateout)
+                                    altrate = float(self.altrateout)
+                                    staletelcoords = True
+                                #Interpolate current predicted position if the telescope coordinates weren't stale
+                                if staletelcoords is False:
+                                    #Only save the current alt/az when the coordinates aren't stale to compare later
+                                    self.lastalt = currentalt
+                                    self.lastaz = currentaz
+                                    predictiontplus = (currentpredictiontime - trackSettings.launchtime).total_seconds()  # the point in time between current_time and next_time
+                                    if self.nextpredicttime-self.currentpredicttime > 0:
+                                        interpolatedalt = self.predictalt + (predictiontplus-self.currentpredicttime)*((self.nextpredictedalt-self.predictalt)/(self.nextpredicttime-self.currentpredicttime))
+                                        interpolatedaz = self.predictaz + (predictiontplus-self.currentpredicttime)*((self.nextpredictedaz-self.predictaz)/(self.nextpredicttime-self.currentpredicttime))
+                                        predictaltdiff = interpolatedalt - currentalt
+                                        predictazdiff = interpolatedaz - currentaz
+                                        azrate = (predictazdiff*trackSettings.aggression) + float(self.azrateout)
+                                        altrate = (predictaltdiff*trackSettings.aggression) + float(self.altrateout)
+
+                                    else:
+                                        continue
+                                #self.azdifflist.append(predictazdiff)
+                                #self.altdifflist.append(predictaltdiff)
+                                #if len(self.azdifflist) > 2:
+                                #    meanazdiff = sum(self.azdifflist)/len(self.azdifflist)
+                                #    meanaltdiff = sum(self.altdifflist)/len(self.altdifflist)
+                                #    self.azdifflist = []
+                                #    self.altdifflist = []
+                                #    azrate = ((predictazdiff*trackSettings.aggression)/predictiontimedelta) + float(self.azrateout) + (0.000001*random.randrange(0, 5, 1))
+                                #    altrate = ((predictaltdiff*trackSettings.aggression)/predictiontimedelta) + float(self.altrateout) + (0.000001*random.randrange(0, 5, 1))
+                                #else:
+                                #    azrate = float(self.azrateout) + (0.000001*random.randrange(0, 5, 1))
+                                #    altrate = float(self.altrateout) + (0.000001*random.randrange(0, 5, 1))
+                        else:
+                            launchobserver.date = datetime.datetime.utcnow()
+                            currentaz = self.tel.Azimuth
+                            currentalt = self.tel.Altitude
+                            currentaltdegrees = currentalt
+                            currentazdegrees = currentaz
+                            altspiralrate = self.spiralalt - currentaltdegrees
+                            azspiralrate = self.spiralaz - currentazdegrees
+                            #print(altspiralrate, azspiralrate)
+                            azrate = float(self.azrateout) + float(azspiralrate*1.5) + (0.000001*random.randrange(0, 5, 1))
+                            altrate = float(self.altrateout) + float(altspiralrate*1.5) + (0.000001*random.randrange(0, 5, 1))
+                            targetname = 'Predicted Position'
+                            futurealt = -20
+                            futureaz = 0
+                            secondstorender = 1
+                            #azrate = (joy0*throttle)*self.axis0rate + float(self.azrateout) + float(azspiralrate*2) + (0.000001*random.randrange(0, 5, 1))
+                            #altrate = (joy1*throttle*-1)*self.axis0rate + float(self.altrateout) + float(altspiralrate*2) + (0.000001*random.randrange(0, 5, 1))
                         if self.joyxrev.get() == 1:
                             azrate = azrate*-1
                         if self.joyyrev.get() == 1:
@@ -1492,12 +2088,26 @@ class buttons:
                             altrate = self.axis1rate
                         if altrate < (-1*self.axis1rate):
                             altrate = (-1*self.axis1rate)
-                        if throttle < 0.001:
+                        if throttle < 0.001 and trackSettings.spiralSearch is False and trackSettings.predictionLock is False:
                             azrate = 0.0 + float(self.azrateout) + (0.000001*random.randrange(0, 5, 1))
                             altrate = 0.0 + float(self.altrateout) + (0.000001*random.randrange(0, 5, 1))
                         try:                            
-                            self.textbox.insert(END, str('Az Rate: ' + str(azrate) + ' Alt Rate: ' + str(altrate) +'\n'))
-                            self.textbox.see('end')
+                            if trackSettings.spiralSearch is False:
+                                if trackSettings.predictionLock is False:
+                                    self.textbox.insert(END, str('Az Rate: ' + str(azrate) + ' Alt Rate: ' + str(altrate) +'\n'))
+                                    self.textbox.see('end')
+                                elif trackSettings.predictionLock is True:
+                                    #self.textbox.insert(END, str('Az Diff: '+str(round(predictazdiff,2))+' Alt Diff: '+str(round(predictaltdiff,2))+' Az Rate: ' + str(round(azrate,2)) + ' Alt Rate: ' + str(round(altrate,2)) +' Current Az: ' + str(round(currentaz,2)) + ' Current Alt: ' + str(round(currentalt,2)) +'\n'))
+                                    if staletelcoords is False:
+                                        self.textbox.insert(END, str('Az Diff: '+str(round(predictazdiff,4))+' Alt Diff: '+str(round(predictaltdiff,4))+' Current Az: ' + str(round(currentaz,4)) + ' Current Alt: ' + str(round(currentalt,4)) +'\n'))
+                                        self.textbox.see('end')
+                                    #else:
+                                    #    self.textbox.insert(END, str('Az Rate: ' + str(azrate) + ' Alt Rate: ' + str(altrate) +'\n'))
+                                    #    self.textbox.see('end')
+                            else:
+                                altspiralrate, azspiralrate
+                                self.textbox.insert(END, str('Spiral Az Diff: ' + str(round(azspiralrate,4)) + ' Spiral Alt Diff: ' + str(round(altspiralrate,4)) +' Spiral Radius: '+str(round(self.currentspiralradius,4))+'\n'))
+                                self.textbox.see('end')
                         except Exception as poop:
                             print(poop)
                             pass
@@ -1635,6 +2245,29 @@ class buttons:
                                 self.focuserSerial.write(b'stopbutton\n')
                         except Exception as e:
                             print(e)
+                    elif trackSettings.ASCOMFocuser is True:
+                        try:
+                            if joyfocus1 == 1:
+                                if trackSettings.focuserabsolute is True:
+                                    currentpos = self.ASCOMFocuser.Position
+                                    newpos = currentpos + trackSettings.maxfocuserstep
+                                    self.ASCOMFocuser.Move(newpos)
+                                else:
+                                    self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                            elif joyfocus2 == 1:
+                                if trackSettings.focuserabsolute is True:
+                                    currentpos = self.ASCOMFocuser.Position
+                                    newpos = currentpos - trackSettings.maxfocuserstep
+                                    self.ASCOMFocuser.Move(newpos)
+                                else:
+                                    self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                            elif trackSettings.haltcompatible is True:
+                                try:
+                                    self.ASCOMFocuser.Halt()
+                                except:
+                                    pass
+                        except Exception as e:
+                            print(e)
                 else:
                     joy0 = self.remotejoy0
                     joy1 = self.remotejoy1
@@ -1652,6 +2285,29 @@ class buttons:
                                 self.focuserSerial.write(b'button2\n')
                             else:
                                 self.focuserSerial.write(b'stopbutton\n')
+                        elif trackSettings.ASCOMFocuser is True:
+                            try:
+                                if joybutton4 == 1:
+                                    if trackSettings.focuserabsolute is True:
+                                        currentpos = self.ASCOMFocuser.Position
+                                        newpos = currentpos + trackSettings.maxfocuserstep
+                                        self.ASCOMFocuser.Move(newpos)
+                                    else:
+                                        self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                elif joybutton5 == 1:
+                                    if trackSettings.focuserabsolute is True:
+                                        currentpos = self.ASCOMFocuser.Position
+                                        newpos = currentpos - trackSettings.maxfocuserstep
+                                        self.ASCOMFocuser.Move(newpos)
+                                    else:
+                                        self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                elif trackSettings.haltcompatible is True:
+                                    try:
+                                        self.ASCOMFocuser.Halt()
+                                    except:
+                                        pass
+                            except Exception as e:
+                                print(e)
                     except Exception as e:
                         print(e)
                 if trackSettings.telescopetype == 'Autostar':
@@ -1757,7 +2413,7 @@ class buttons:
                                 if trackSettings.foundtarget is True:
                                     azaccel = azrate - self.azratelast
                                     self.azratelast = azrate
-                                azrate = azrate + (azdiff) 
+                                azrate = azrate + (azdiff*trackSettings.aggression) 
                                 #if math.fabs(self.diffaltlast) < math.fabs(altdiff):
                                 if self.pretrack is True:
                                     self.altratelast = altrate
@@ -1767,7 +2423,7 @@ class buttons:
                                 if trackSettings.foundtarget is True:
                                     altaccel = altrate - self.altratelast
                                     self.altratelast = altrate
-                                altrate = altrate + (altdiff)
+                                altrate = altrate + (altdiff*trackSettings.aggression)
 
                         if azrate > self.axis0rate:
                             azrate = self.axis0rate
@@ -1885,7 +2541,7 @@ class buttons:
                                 if trackSettings.foundtarget is True:
                                     azaccel = azrate - self.azratelast
                                     self.azratelast = azrate
-                                azrate =  float(self.azrateout) + (azdiff) 
+                                azrate =  float(self.azrateout) + (azdiff*trackSettings.aggression) 
                                 #if math.fabs(self.diffaltlast) < math.fabs(altdiff):
                                 if self.pretrack is True:
                                     self.altratelast = altrate
@@ -1895,7 +2551,7 @@ class buttons:
                                 if trackSettings.foundtarget is True:
                                     altaccel = altrate - self.altratelast
                                     self.altratelast = altrate
-                                altrate =  float(self.altrateout) + (altdiff)
+                                altrate =  float(self.altrateout) + (altdiff*trackSettings.aggression)
                                 if azrate > self.axis0rate:
                                     azrate = self.axis0rate
                                 if azrate < (-1*self.axis0rate):
@@ -2017,6 +2673,29 @@ class buttons:
                                         self.focuserSerial.write(b'stopbutton\n')
                                 except Exception as e:
                                     print(e)
+                            elif trackSettings.ASCOMFocuser is True:
+                                try:
+                                    if joyfocus1 == 1:
+                                        if trackSettings.focuserabsolute is True:
+                                            currentpos = self.ASCOMFocuser.Position
+                                            newpos = currentpos + trackSettings.maxfocuserstep
+                                            self.ASCOMFocuser.Move(newpos)
+                                        else:
+                                            self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                    elif joyfocus2 == 1:
+                                        if trackSettings.focuserabsolute is True:
+                                            currentpos = self.ASCOMFocuser.Position
+                                            newpos = currentpos - trackSettings.maxfocuserstep
+                                            self.ASCOMFocuser.Move(newpos)
+                                        else:
+                                            self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                    elif trackSettings.haltcompatible is True:
+                                        try:
+                                            self.ASCOMFocuser.Halt()
+                                        except:
+                                            pass
+                                except Exception as e:
+                                    print(e)
                         else:
                             joy0 = self.remotejoy0
                             joy1 = self.remotejoy1
@@ -2034,6 +2713,29 @@ class buttons:
                                         self.focuserSerial.write(b'button2\n')
                                     else:
                                         self.focuserSerial.write(b'stopbutton\n')
+                                elif trackSettings.ASCOMFocuser is True:
+                                    try:
+                                        if joybutton4 == 1:
+                                            if trackSettings.focuserabsolute is True:
+                                                currentpos = self.ASCOMFocuser.Position
+                                                newpos = currentpos + trackSettings.maxfocuserstep
+                                                self.ASCOMFocuser.Move(newpos)
+                                            else:
+                                                self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                        elif joybutton5 == 1:
+                                            if trackSettings.focuserabsolute is True:
+                                                currentpos = self.ASCOMFocuser.Position
+                                                newpos = currentpos - trackSettings.maxfocuserstep
+                                                self.ASCOMFocuser.Move(newpos)
+                                            else:
+                                                self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                        elif trackSettings.haltcompatible is True:
+                                            try:
+                                                self.ASCOMFocuser.Halt()
+                                            except:
+                                                pass
+                                    except Exception as e:
+                                        print(e)
                             except Exception as e:
                                 print(e)
                             #print(self.remotejoy0,self.remotejoy1,self.remotethrottle)
@@ -2400,6 +3102,29 @@ class buttons:
                                 self.focuserSerial.write(b'stopbutton\n')
                         except Exception as e:
                             print(e)
+                    elif trackSettings.ASCOMFocuser is True:
+                        try:
+                            if joyfocus1 == 1:
+                                if trackSettings.focuserabsolute is True:
+                                    currentpos = self.ASCOMFocuser.Position
+                                    newpos = currentpos + trackSettings.maxfocuserstep
+                                    self.ASCOMFocuser.Move(newpos)
+                                else:
+                                    self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                            elif joyfocus2 == 1:
+                                if trackSettings.focuserabsolute is True:
+                                    currentpos = self.ASCOMFocuser.Position
+                                    newpos = currentpos - trackSettings.maxfocuserstep
+                                    self.ASCOMFocuser.Move(newpos)
+                                else:
+                                    self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                            elif trackSettings.haltcompatible is True:
+                                try:
+                                    self.ASCOMFocuser.Halt()
+                                except:
+                                    pass
+                        except Exception as e:
+                            print(e)
                 else:
                     joy0 = self.remotejoy0
                     joy1 = self.remotejoy1
@@ -2417,6 +3142,29 @@ class buttons:
                                 self.focuserSerial.write(b'button2\n')
                             else:
                                 self.focuserSerial.write(b'stopbutton\n')
+                        elif trackSettings.ASCOMFocuser is True:
+                            try:
+                                if joybutton4 == 1:
+                                    if trackSettings.focuserabsolute is True:
+                                        currentpos = self.ASCOMFocuser.Position
+                                        newpos = currentpos + trackSettings.maxfocuserstep
+                                        self.ASCOMFocuser.Move(newpos)
+                                    else:
+                                        self.ASCOMFocuser.Move(int(trackSettings.maxfocuserstep))
+                                elif joybutton5 == 1:
+                                    if trackSettings.focuserabsolute is True:
+                                        currentpos = self.ASCOMFocuser.Position
+                                        newpos = currentpos - trackSettings.maxfocuserstep
+                                        self.ASCOMFocuser.Move(newpos)
+                                    else:
+                                        self.ASCOMFocuser.Move(int(-1*trackSettings.maxfocuserstep))
+                                elif trackSettings.haltcompatible is True:
+                                    try:
+                                        self.ASCOMFocuser.Halt()
+                                    except:
+                                        pass
+                            except Exception as e:
+                                print(e)
                     except Exception as e:
                         print(e)
                 if trackSettings.telescopetype == 'Autostar':
@@ -2649,7 +3397,7 @@ class buttons:
                                 if trackSettings.foundtarget is True:
                                     azaccel = azrate - self.azratelast
                                     self.azratelast = azrate
-                                azrate = azrate + (azdiff) 
+                                azrate = azrate + (azdiff*trackSettings.aggression) 
                                 #if math.fabs(self.diffaltlast) < math.fabs(altdiff):
                                 if self.pretrack is True:
                                     self.altratelast = altrate
@@ -2659,7 +3407,7 @@ class buttons:
                                 if trackSettings.foundtarget is True:
                                     altaccel = altrate - self.altratelast
                                     self.altratelast = altrate
-                                altrate = altrate + (altdiff)
+                                altrate = altrate + (altdiff*trackSettings.aggression)
                                 if azrate > self.axis0rate:
                                     azrate = self.axis0rate
                                 if azrate < (-1*self.axis0rate):
@@ -2724,9 +3472,9 @@ class buttons:
                                 rarate = (math.degrees(self.radra2 - self.radra))
                                 decrate = math.degrees(self.raddec2 - self.raddec)
                                 #if math.fabs(self.diffralast) < math.fabs(radiff):
-                                rarate = rarate + math.degrees(radiff)
+                                rarate = rarate + math.degrees(radiff)*trackSettings.aggression
                                 #if math.fabs(self.diffdeclast) < math.fabs(decdiff):
-                                decrate = decrate + math.degrees(decdiff)
+                                decrate = decrate + math.degrees(decdiff)*trackSettings.aggression
                                 if rarate > self.axis0rate:
                                     rarate = self.axis0rate
                                 if rarate < (-1*self.axis0rate):
@@ -2991,7 +3739,22 @@ class buttons:
                     print("Telescope was already connected")
                     self.textbox.insert(END, str('Telescope was already connected.\n'))
                     self.textbox.see('end')
-                    self.startButton5.configure(text='Disconnect Scope')
+                    #self.startButton5.configure(text='Disconnect Scope')
+                    axis = self.tel.CanMoveAxis(0)
+                    axis2 = self.tel.CanMoveAxis(1)
+                    if axis is False or axis2 is False:
+                        print('This scope cannot use the MoveAxis method, aborting.')
+                        self.textbox.insert(END, str('This scope cannot use the MoveAxis method, aborting.\n'))
+                        self.textbox.see('end')
+                        self.tel.Connected = False
+                    else:
+                        self.axis0rate = float(self.tel.AxisRates(0).Item(1).Maximum)
+                        self.axis1rate = float(self.tel.AxisRates(1).Item(1).Maximum)
+                        print(self.axis0rate)
+                        print(self.axis1rate)
+                        self.textbox.insert(END, str('Axis 0 max rate: '+str(self.axis0rate)+' Axis 1 max rate: '+ str(self.axis1rate)+'\n'))
+                        self.textbox.see('end')
+                        self.startButton5.configure(text='Disconnect Scope')
                 else:
                     self.tel.Connected = True
                     if self.tel.Connected:
@@ -3399,13 +4162,13 @@ class buttons:
             ret, self.img = self.cap.read()
             if ret is True:
                 self.height, self.width = self.img.shape[:2]
-                if self.width > (trackSettings.screen_width*0.45):
-                    shrinkfactor = (trackSettings.screen_width*0.45)/self.width
+                if self.width > (trackSettings.screen_width*trackSettings.screenshrink):
+                    shrinkfactor = (trackSettings.screen_width*trackSettings.screenshrink)/self.width
                     self.width = int(self.width * shrinkfactor)
                     self.height = int(self.height * shrinkfactor)
                     self.img = cv2.resize(self.img, (self.width, self.height), interpolation = cv2.INTER_AREA)
-                elif self.height > (trackSettings.screen_height*0.45):
-                    shrinkfactor = (trackSettings.screen_height*0.45)/self.height
+                elif self.height > (trackSettings.screen_height*trackSettings.screenshrink):
+                    shrinkfactor = (trackSettings.screen_height*trackSettings.screenshrink)/self.height
                     self.width = int(self.width * shrinkfactor)
                     self.height = int(self.height * shrinkfactor)
                     self.img = cv2.resize(self.img, (self.width, self.height), interpolation = cv2.INTER_AREA)
