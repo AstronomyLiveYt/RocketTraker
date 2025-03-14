@@ -26,6 +26,7 @@ import launchlistdownloader
 import flightclubdownloader
 from PIL import Image as PILImage, ImageTk
 from urllib.request import urlopen
+import rocketplanetarium
 
 class trackSettings:
     
@@ -35,11 +36,13 @@ class trackSettings:
     tracking = False
     boxSize = 50
     mousecoords = (320,240)
+    mapmousecoords = (0,0)
     degorhours = 'Degrees'
     mainviewX = 320
     mainviewY = 240
     crosshairX = 320
     crosshairY = 240
+    maglimit = 5
     setcenter = False
     imagescale = 1.0
     trajFile = ''
@@ -88,11 +91,26 @@ class trackSettings:
     launchtime = datetime.datetime.utcnow()
     aggression = 1.0
     screenshrink = 0.40
+    ioptronnormalmoderesponses = ['5035','0035','0052','0033','0034','0050','0051']
+    ioptronspecialmoderesponses = ['9035','8035','8052','8033','8034','8050','8051']
     ASCOMFocuser = False
     haltcompatible = False
     focuserabsolute = False
     maxfocuserstep = 1
     absolutefocuser = False
+    alignedpoints = []
+    renderStarMap = False
+    syncTarget = ''
+    syncDistance = 9999999999
+    syncRA = 0
+    syncDec = 0
+    slewTarget = ''
+    slewDistance = 0
+    slewRA = 0
+    slewDec = 0
+    goforSlew = False
+    slewCompleted = False
+    cancelLaunch = False
     
 class KalmanFilter:
 
@@ -222,14 +240,98 @@ class videotrak:
     
 
 class buttons:       
+
+    def equatorial_to_horizon(self, dec, ra, lat, lst):
+        hour = lst - ra
+        if math.degrees(hour) < 0:
+            hour = math.radians(math.degrees(hour) + 360)
+        elif math.degrees(hour) > 360:
+            hour = math.radians(math.degrees(hour) - 360)
+        alt = math.asin(math.sin(dec)*math.sin(lat)+math.cos(dec)*math.cos(lat)*math.cos(hour))
+        az = math.acos((math.sin(dec)-math.sin(lat)*math.sin(alt))/(math.cos(lat)*math.cos(alt)))
+        if math.sin(hour)>0:
+            az = (360 - (az * 180/math.pi))*(math.pi/180)
+        az = math.radians(math.degrees(az))
+        if math.degrees(az) > 360:
+            az = math.radians(math.degrees(az) - 360)
+        alt = math.degrees(alt)
+        az = math.degrees(az)
+        return(alt, az)
+    
+    def calc_obliquity(self, T):
+        #T = number of julian centuries since 2000 Jan 1.5
+        epsilon = 23.43929167 - 0.013004167 * T - 0.000000167 * T**2 + 0.000000502778 * T**3
+        return(epsilon)
+
+    def calc_nutation(self, current_time):
+        #Do a test
+        #B1900time = datetime.datetime(1900,1,1,00,00,00)
+        #testtime = datetime.datetime(1988, 9, 1, 0,0,0)
+        #time_difference = (testtime - B1900time).total_seconds()
+        #T = (time_difference / (365.25 * 24 * 3600))/100
+        #A =  100.002136 * T
+        #L =  279.6967 + 360.0 * (A - int(A))
+        #B =  5.372617 * T
+        #Omega =  259.1833 - 360.0 * (B - int(B))
+        #ecllonDelta = (-17.2*math.sin(math.radians(Omega)) - 1.3*math.sin(math.radians(2*L)))
+        #ecloblDelta = (9.2*math.cos(math.radians(Omega)) + 0.5*math.cos(math.radians(2*L)))
+        #print(ecllonDelta,ecloblDelta)
+        #T = number of julian centuries since 1900 Jan 0.5
+        B1900time = datetime.datetime(1900,1,1,00,00,00)
+        time_difference = (current_time - B1900time).total_seconds()
+        T = (time_difference / (365.25 * 24 * 3600))/100
+        A =  100.002136 * T
+        L =  279.6967 + 360.0 * (A - int(A))
+        B =  5.372617 * T
+        Omega =  259.1833 - 360.0 * (B - int(B))
+        ecllonDelta = (-17.2*math.sin(math.radians(Omega)) - 1.3*math.sin(math.radians(2*L)))/3600
+        ecloblDelta = (9.2*math.cos(math.radians(Omega)) + 0.5*math.cos(math.radians(2*L)))/3600
+        return(ecllonDelta,ecloblDelta)
+        
+
+    def correct_aberration(self, ra, dec, current_time):
+        #This corrects for both stellar aberration AND nutation using the function above, be advised if you want to use this function elsewhere
+        J2000time = datetime.datetime(2000, 1, 1, 12, 0, 0)
+        time_difference = (current_time - J2000time).total_seconds()
+        J2000T = (time_difference / (365.25 * 24 * 3600))/100
+        obliquity = self.calc_obliquity(J2000T)
+        ecllonDelta,ecloblDelta = self.calc_nutation(current_time)
+        obliquity +=ecloblDelta
+        sun = ephem.Sun(current_time)
+        sunra = sun.g_ra
+        sundec = sun.g_dec
+        suneq = ephem.Equatorial(sunra, sundec, epoch=current_time)
+        sunlon = ephem.Ecliptic(suneq).lon
+        deltaRA = (-20.5*((math.cos(math.radians(ra))*math.cos((sunlon))*math.cos(math.radians(obliquity))+math.sin(math.radians(ra))*math.sin((sunlon)))/math.cos(math.radians(dec))))/3600
+        deltaDec = (-20.5*(math.cos((sunlon))*math.cos(math.radians(obliquity))*(math.tan(math.radians(obliquity))*math.cos(math.radians(dec))-math.sin(math.radians(ra))*math.sin(math.radians(dec)))+math.cos(math.radians(ra))*math.sin(math.radians(dec))*math.sin((sunlon))))/3600
+        deltaRAsec = deltaRA*3600
+        deltaDecsec = deltaDec*3600
+        correctedRA = ra + deltaRA
+        correctedDec = dec + deltaDec
+        correctedStar = ephem.Equatorial(math.radians(correctedRA), math.radians(correctedDec), epoch=current_time)
+        correctedStarEcl = ephem.Ecliptic(correctedStar, epoch=current_time)
+        nutdeltaRa = (math.cos(math.radians(obliquity))+math.sin(math.radians(obliquity))*math.sin(math.radians(correctedRA))*math.tan(math.radians(correctedDec)))*ecllonDelta-math.cos(math.radians(correctedRA))*math.tan(math.radians(correctedDec))*ecloblDelta
+        nutdeltaDec = math.cos(math.radians(correctedRA))*math.sin(math.radians(obliquity))*ecllonDelta+math.sin(math.radians(correctedRA))*ecloblDelta
+        fullycorrectedRA = correctedRA + nutdeltaRa
+        fullycorrectedDec = correctedDec + nutdeltaDec
+        return(fullycorrectedRA, fullycorrectedDec)
     
     def __init__(self, master):
         trackSettings.screen_width = root.winfo_screenwidth()
         trackSettings.screen_height = root.winfo_screenheight()
+        self.starmapsize = round(trackSettings.screen_height*0.6)
         print(trackSettings.screen_width)
         print(trackSettings.screen_height)
         pygame.init()
         self.joysticks = [pygame.joystick.Joystick(x) for x in range(pygame.joystick.get_count())]
+        
+        self.alt = 0.0
+        self.az = 0.0
+        self.altratelast = 0.0
+        self.azratelast = 0.0
+        
+        #Prepare to check command rate of telescope
+        self.tlastcommand = datetime.datetime.utcnow()
         
         #Prepare for remote connection
         self.HEADERSIZE = 10
@@ -261,10 +363,12 @@ class buttons:
         self.labelLat = Label(self.bottomframe, text='Latitude (N+)')
         self.labelLat.grid(row=5, column = 0)
         self.entryLat = Entry(self.bottomframe)
+        #self.entryLat = Entry(self.bottomframe, show='*')
         self.entryLat.grid(row = 5, column = 1)
         self.labelLon = Label(self.bottomframe, text='Longitude (E+)')
         self.labelLon.grid(row=6, column = 0)
         self.entryLon = Entry(self.bottomframe)
+        #self.entryLon = Entry(self.bottomframe, show='*')
         self.entryLon.grid(row = 6, column = 1)
         self.joyxrev = IntVar()
         self.joyyrev = IntVar()
@@ -276,6 +380,67 @@ class buttons:
         #self.labelBright.grid(row=8, column = 0)
         #self.entryBright = Entry(self.bottomframe)
         #self.entryBright.grid(row = 8, column = 1)
+        
+        #Load Bright Star Catalogue
+        self.starcat = []
+        #Catalog list will be RA, Dec, Name, Magnitude, Spectral Classification
+        try:
+            STAR_FOLDER = os.path.dirname(os.path.abspath(__file__))
+            constellationsfile = os.path.join(STAR_FOLDER, 'constellationlines.csv')
+            self.constellationdf = pd.read_csv(constellationsfile)
+            starfile = os.path.join(STAR_FOLDER, 'bsc5.dat')
+            J2000time = datetime.datetime(2000, 1, 1, 12, 0, 0)  # January 1st, 2000 at 12:00 UTC
+            current_date = datetime.datetime.utcnow()  # Get the current date and time in UTC
+
+            # Calculate the difference in seconds
+            time_difference = (current_date - J2000time).total_seconds()
+
+            # Convert the time difference from seconds to years (considering an average year length)
+            fractional_year = time_difference / (365.25 * 24 * 3600)
+            with open(starfile) as f:
+                lines = [line.rstrip('\n') for line in f]
+                for idx, line in enumerate(lines):
+                    try:
+                        rahour = (line[75:77])
+                        ramin = (line[77:79])
+                        rasec = (line[79:83])
+                        decdeg = (line[83:86])
+                        decmin = (line[86:88])
+                        decsec = (line[88:90])
+                        spectral = line[129:130]
+                        mag = line[102:107]
+                        raprop = line[148:154]
+                        decprop = line[154:160]
+                        name = line[7:24]
+                        rahour = float(rahour)
+                        ramin = float(ramin)
+                        rasec = float(rasec)
+                        decdeg = float(decdeg)
+                        decmin = float(decmin)
+                        decsec = float(decsec)
+                        totalraprop = float(raprop)*fractional_year
+                        totaldecprop = float(decprop)*fractional_year
+                        raj2000 = ((((rasec/60)+ramin)/60)+rahour)*15
+                        if decdeg > 0:
+                            decj2000 = ((((decsec/60)+decmin)/60)+decdeg)
+                        else:
+                            decj2000 = (decdeg-(((decsec/60)+decmin)/60))
+                        raproped = raj2000+(totalraprop/3600)
+                        decproped = decj2000+(totaldecprop/3600)
+                        starj2000 = ephem.Equatorial(math.radians(raproped), math.radians(decproped), epoch=ephem.J2000)
+                        starEOD = ephem.Equatorial(starj2000, epoch=current_date)
+                        #correct for nutation and aberration
+                        correctedRA, correctedDec = self.correct_aberration(math.degrees(starEOD.ra), math.degrees(starEOD.dec), current_date)
+                        correctedStar = ephem.Equatorial(math.radians(correctedRA), math.radians(correctedDec), epoch=current_date)
+                        self.starcat.append((math.degrees(correctedStar.ra), math.degrees(correctedStar.dec),name,mag,spectral))
+                    except:
+                        pass
+        except Exception as starerror:
+            print('Unable to load bright star catalog')
+            print(starerror)
+        #current_date = datetime.datetime.utcnow()  # Get the current date and time in UTC
+        #star = ephem.Equatorial(math.radians(self.starcat[7543][0]),math.radians(self.starcat[7543][1]),epoch=current_date)
+        #print(self.starcat[7543][2],star.ra,star.dec)
         
         try:
             config = open('rocketconfig.txt', 'r')
@@ -315,6 +480,11 @@ class buttons:
         except Exception as e:
             print(e)
             print('Config file not present or corrupted.')
+        
+        try:
+            self.pointingerrorDF = pd.read_csv('telpoints.csv')
+        except Exception as e:
+            print(e)
         
         try:
             #geolocation = geocoder.ip('me')
@@ -360,13 +530,15 @@ class buttons:
         self.startButton3.grid(row=4, column = 1)
         self.startButton4 = Button(self.bottomframe, text='Start Joystick Tracking', command=self.start_joy_track)
         self.startButton4.grid(row=8, column = 1)
+        self.slewabortButton = Button(self.bottomframe, text='Abort Slew', command=self.abortSlew)
+        self.slewabortButton.grid(row=7, column = 0)
         self.startButton5 = Button(self.bottomframe, text='Connect Scope', command=self.set_tracking)
         self.startButton5.grid(row=1, column = 1)
         self.startButtonCross = Button(self.bottomframe, text='Reset Crosshair', command=self.set_crosshair)
         self.startButtonCross.grid(row=7, column = 1)
         try:
             self.dropDown1 = OptionMenu(self.bottomframe, self.droplist, *self.LAUNCHES, command=self.LaunchSelect)
-            self.dropDown1.grid(row=7, column = 0)
+            self.dropDown1.grid(row=8, column = 0)
         except:
             pass
 
@@ -480,6 +652,11 @@ class buttons:
         self.imageMenu.add_command(label='Rotate Image 90 Degrees', command=self.setPos90Rotate)
         self.imageMenu.add_command(label='Rotate Image -90 Degrees', command=self.setNeg90Rotate)
         self.imageMenu.add_command(label='Rotate Image 180 Degrees', command=self.set180Rotate)
+        
+        self.mapMenu = Menu(self.menu)
+        self.menu.add_cascade(label='Map', menu=self.mapMenu)
+        self.mapMenu.add_command(label='All Sky Map', command=self.starMap)
+        self.mapMenu.add_command(label='Pointing Error List', command=self.correctionList)
         
         self.optionsMenu = Menu(self.menu)
         self.menu.add_cascade(label='Options', menu=self.optionsMenu)
@@ -883,7 +1060,14 @@ class buttons:
 
     def set_crosshair(self):
         trackSettings.crosshairX = trackSettings.mainviewX
-        trackSettings.crosshairY = trackSettings.mainviewY        
+        trackSettings.crosshairY = trackSettings.mainviewY
+        
+    def atm_refraction(self, altitude):
+        if altitude>15:
+            refraction = 0.00452*trackSettings.pressure*math.tan(math.radians((90-altitude)/(273+trackSettings.temperature)))
+        else:
+            refraction = (trackSettings.pressure*(0.1594+(0.0196*altitude)+(0.00002*altitude**2)))/((273+trackSettings.temperature)*(1+(0.505*altitude)+(0.0845*altitude**2)))
+        return(refraction)
         
     def filePicker(self):
         trackSettings.trajFile = filedialog.askopenfilename(initialdir = ".",title = "Select Trajectory file",filetypes = (("csv files","*.csv"),("all files","*.*")))
@@ -891,6 +1075,464 @@ class buttons:
         print(trackSettings.trajFile)
         self.textbox.insert(END, str(str(trackSettings.trajFile)+'\n'))
         self.textbox.see('end')
+        constnow = datetime.datetime.utcnow()
+        #Get the T0 time to project the path at launch time
+        t0 = self.entryNET.get()
+        t0 = datetime.datetime.strptime(t0, '%Y-%m-%dT%H:%M:%SZ')
+        launchobserver = ephem.Observer()
+        launchobserver.lat = (str(self.entryLat.get()))
+        launchobserver.lon = (str(self.entryLon.get()))
+        launchobserver.date = t0
+        launchobserver.pressure = trackSettings.pressure
+        launchobserver.temp = trackSettings.temperature
+        launchobserver.epoch = launchobserver.date
+        mtelalt = -10
+        mtelaz = 0
+        rendersize = self.starmapsize
+        rocketpath = []
+        df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
+        startaltfound = False
+        for index, row in df.iterrows():
+            #Find the row that it rises on horizon and slew there
+            rowalt = float(row['elevationDegs'])
+            refraction = self.atm_refraction(rowalt)
+            rowalt = rowalt+refraction
+            if rowalt > trackSettings.horizonaltitude:
+                startaltfound = True
+            if startaltfound is True:                
+                thisrowalt = float(row['elevationDegs'])
+                horizonaz = float(row['azimuthDegs'])
+                rocketpath.append((thisrowalt,horizonaz))
+        planetariumimage, staraltazlist = rocketplanetarium.render_sky(self.starcat,self.constellationdf,constnow,launchobserver,mtelalt,mtelaz,rocketpath,trackSettings.alignedpoints,rendersize,trackSettings.maglimit)
+        cv2.imshow('Rocket Trajectory at Liftoff',planetariumimage)
+        cv2.waitKey(1)
+    
+    def errorWeightedAverage(self, ref_tel_alt, ref_tel_az):
+        if len(self.pointingerrorDF) > 0:
+            alt_weights = []
+            az_weights = []
+            alt_errors = []
+            az_errors = []
+            for index, row in self.pointingerrorDF.iterrows():
+                sep = ephem.separation((math.radians(row['tel az']),math.radians(row['tel alt'])),(math.radians(ref_tel_az),math.radians(ref_tel_alt)))
+                sep = math.degrees(sep)
+                #Use the square of the separation for weights
+                alt_weight = 1 / (sep + 1e-6)**2
+                az_weight = 1 / (sep + 1e-6)**2
+                alt_weights.append(alt_weight)
+                az_weights.append(az_weight)
+            for index, row in self.pointingerrorDF.iterrows():
+                thisalterror = row['alt sep']*(alt_weights[index]/sum(alt_weights))
+                alt_errors.append(thisalterror)
+                thisazerror = row['az sep']*(az_weights[index]/sum(az_weights))
+                az_errors.append(thisazerror)
+            weighted_avg_alt_sep = sum(alt_errors)
+            weighted_avg_az_sep = sum(az_errors)
+        else:
+            weighted_avg_alt_sep = 0.0
+            weighted_avg_az_sep = 0.0
+            
+        # Return results
+        return(weighted_avg_alt_sep, weighted_avg_az_sep)
+    
+    def syncNow(self):
+        if self.tel.Connected is True:
+            telalt = self.tel.Altitude
+            telaz = self.tel.Azimuth
+            constnow = datetime.datetime.utcnow()
+            launchobserver = ephem.Observer()
+            launchobserver.lat = (str(self.entryLat.get()))
+            launchobserver.lon = (str(self.entryLon.get()))
+            launchobserver.date = constnow
+            launchobserver.pressure = trackSettings.pressure
+            launchobserver.temp = trackSettings.temperature
+            launchobserver.epoch = launchobserver.date
+            starDec = math.radians(trackSettings.syncDec)
+            starRA = math.radians(trackSettings.syncRA)
+            staralt, staraz = self.equatorial_to_horizon(starDec, starRA, launchobserver.lat, launchobserver.sidereal_time())
+            refraction = self.atm_refraction(staralt)
+            staralt = staralt+refraction
+            altdelta = staralt - telalt
+            azdelta = staraz - telaz
+            errordict = {'tel alt':telalt,'tel az':telaz,'alt sep':altdelta,'az sep':azdelta}
+            self.pointingerrorDF = pd.concat([self.pointingerrorDF, pd.DataFrame([errordict])], ignore_index=True, sort=False)
+            print(self.pointingerrorDF)
+            self.pointingerrorDF.to_csv('telpoints.csv',index=False)
+    
+    def boresightSyncPopUp(self):
+        self.syncwindow= Toplevel(root)
+        self.syncwindow.geometry('200x100')
+        self.syncwindow.title("Sync On Star?")
+        trackSettings.syncTarget = ''
+        trackSettings.syncDistance = 0
+        constnow = datetime.datetime.utcnow()
+        launchobserver = ephem.Observer()
+        launchobserver.lat = (str(self.entryLat.get()))
+        launchobserver.lon = (str(self.entryLon.get()))
+        launchobserver.date = constnow
+        launchobserver.pressure = trackSettings.pressure
+        launchobserver.temp = trackSettings.temperature
+        launchobserver.epoch = launchobserver.date
+        if self.tel.Connected is True:
+            #mtelra = self.tel.RightAscension*15
+            #mteldec = self.tel.Declination
+            telalt = self.tel.Altitude
+            telaz = self.tel.Azimuth
+            ref_tel_alt = telalt
+            ref_tel_az = telaz
+            weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+            telaz = ref_tel_az + weighted_avg_az_sep
+            telalt = ref_tel_alt + weighted_avg_alt_sep
+            print(telalt, telaz)
+            lowestsep = 180
+            for star in self.starcat:
+                staralt, staraz = self.equatorial_to_horizon(math.radians(star[1]), math.radians(star[0]), launchobserver.lat, launchobserver.sidereal_time())
+                refraction = self.atm_refraction(staralt)
+                staralt = staralt+refraction
+                currentsep = ephem.separation((math.radians(telaz),math.radians(telalt)),(math.radians(staraz),math.radians(staralt)))
+                if math.degrees(currentsep)<lowestsep:
+                    lowestsep = math.degrees(currentsep)
+                    trackSettings.syncTarget = star[2]
+                    trackSettings.syncDistance = round((lowestsep*3600),1)
+                    trackSettings.syncRA = star[0]
+                    trackSettings.syncDec = star[1]
+        else:
+            trackSettings.syncTarget='Nothing Because You Need To Connect Telescope First'
+        self.synctargetLabel = Label(self.syncwindow, text=str('Sync Target: '+str(trackSettings.syncTarget)))
+        self.synctargetLabel.grid(row = 0, column = 0)
+        self.syncsepLabel = Label(self.syncwindow, text=str('Sync Distance Arcseconds: '+str(trackSettings.syncDistance)))
+        self.syncsepLabel.grid(row = 1, column = 0)
+        self.syncButton = Button(self.syncwindow, text=str('Sync!'),command = self.syncNow)
+        self.syncButton.grid(row = 2, column = 0)
+        
+    
+    def render_starMap(self):
+        while trackSettings.renderStarMap is True:
+            constnow = datetime.datetime.utcnow()
+            launchobserver = ephem.Observer()
+            launchobserver.lat = (str(self.entryLat.get()))
+            launchobserver.lon = (str(self.entryLon.get()))
+            launchobserver.date = constnow
+            launchobserver.pressure = trackSettings.pressure
+            launchobserver.temp = trackSettings.temperature
+            launchobserver.epoch = launchobserver.date
+            rendersize = self.starmapsize
+            #Remember you need a rocketpath list even if it's empty
+            rocketpath = []
+            if trackSettings.fileSelected is True:
+                t0 = self.entryNET.get()
+                t0 = datetime.datetime.strptime(t0, '%Y-%m-%dT%H:%M:%SZ')
+                #launchobserver.date = t0
+                #launchobserver.epoch = launchobserver.date
+                df = pd.read_csv(trackSettings.trajFile, sep=',', encoding="utf-8")
+                startaltfound = False
+                for index, row in df.iterrows():
+                    #Find the row that it rises on horizon and slew there
+                    rowalt = float(row['elevationDegs'])
+                    refraction = self.atm_refraction(rowalt)
+                    rowalt = rowalt+refraction
+                    if rowalt > trackSettings.horizonaltitude:
+                        startaltfound = True
+                    if startaltfound is True:                
+                        thisrowalt = float(row['elevationDegs'])
+                        horizonaz = float(row['azimuthDegs'])
+                        rocketpath.append((thisrowalt,horizonaz))
+            mtelalt = -10
+            mtelaz = 0
+            try:
+                if self.tel.Connected is True:
+                    mtelaz = self.tel.Azimuth
+                    mtelalt = self.tel.Altitude
+                    #Lines to test show the weighted average error
+                    #weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(mtelalt, mtelaz)
+                    #currentaz = mtelaz - weighted_avg_az_sep
+                    #currentalt = mtelalt - weighted_avg_alt_sep
+                    #print(currentalt, currentaz, weighted_avg_alt_sep, weighted_avg_az_sep)
+            except:
+                pass
+            try:
+                mag = float(self.entrymaglimit.get())
+                trackSettings.maglimit = mag
+            except:
+                pass
+            planetariumimage,self.staraltazlist = rocketplanetarium.render_sky(self.starcat,self.constellationdf,constnow,launchobserver,mtelalt,mtelaz,rocketpath,trackSettings.alignedpoints,rendersize, trackSettings.maglimit)
+            b,g,r = cv2.split(planetariumimage)
+            tkimg = cv2.merge((r,g,b))
+            tkimg = PILImage.fromarray(tkimg)
+            tkimg = ImageTk.PhotoImage(image=tkimg)
+            displayimg = Label(self.starmaptopframe, bg="black")
+            displayimg.config(image=tkimg)
+            displayimg.img = tkimg
+            displayimg.grid(row = 0, column = 0)
+            displayimg.bind("<Button-1>", self.map_left_click)
+            displayimg.bind("<Motion>", self.map_mouse_position)
+            time.sleep(1)          
+
+    def map_mouse_position(self, event):
+        trackSettings.mapmousecoords = (event.x, event.y)
+
+    def map_left_click(self, event):
+        #if trackSettings.setcenter is True:
+        rendersize = self.starmapsize
+        halfrendersize = rendersize/2
+        mapX = trackSettings.mapmousecoords[0]
+        mapY = trackSettings.mapmousecoords[1]
+        centerX = halfrendersize
+        centerY = halfrendersize
+        zenithpix = math.sqrt((centerX - mapX)**2+(centerY - mapY)**2)
+        if zenithpix == 0:
+            alt = 90
+            az = 0
+        else:
+            zenithdeg = zenithpix/(halfrendersize/90)
+            alt = 90-zenithdeg
+            azX = mapX - halfrendersize
+            azY = halfrendersize - mapY
+            az = math.degrees(math.atan2(azY,azX))-90
+            if az < 0:
+                az+=360
+        print(alt, az)
+        lowestsep = 180
+        name = ''
+        mag = 20
+        staralt = 0
+        staraz = 0
+        if len(self.staraltazlist)>0:
+            for star in self.staraltazlist:
+                originalalt = star[0]
+                originalaz = star[1]
+                if star[1] < 0:
+                    thisaz=star[1]+360
+                else:
+                    thisaz=star[1]
+                currentsep = ephem.separation((math.radians(thisaz),math.radians(star[0])),(math.radians(az),math.radians(alt)))
+                if math.degrees(currentsep)<lowestsep:
+                    lowestorigalt = originalalt
+                    lowestorigaz = originalaz
+                    lowestsep = math.degrees(currentsep)
+                    name = star[2]
+                    mag = star[3]
+                    staralt = star[0]
+                    staraz = thisaz
+            for star in self.starcat:
+                if star[2] == name and star[3] == mag:
+                    RAstar = star[0]
+                    Decstar = star[1]
+            #Found the star that was clicked on, now bring up options window!
+            print(name, lowestsep, staralt, staraz)
+            self.starSlewPopUp(name, mag, RAstar, Decstar)
+        #x1 = int((zenith*math.cos(az1))*(halfrendersize/90)+halfrendersize)
+        #y1 = int((zenith*math.sin(az1))*(halfrendersize/90)+halfrendersize)
+    
+    def starSlewPopUp(self, starname, starmag, starRA, starDec):
+        #starname = starname[:-4]
+        constnow = datetime.datetime.utcnow()
+        launchobserver = ephem.Observer()
+        launchobserver.lat = (str(self.entryLat.get()))
+        launchobserver.lon = (str(self.entryLon.get()))
+        launchobserver.date = constnow
+        launchobserver.pressure = trackSettings.pressure
+        launchobserver.temp = trackSettings.temperature
+        launchobserver.epoch = launchobserver.date
+        starDecrad = math.radians(starDec)
+        starRArad = math.radians(starRA)
+        staralt, staraz = self.equatorial_to_horizon(starDecrad, starRArad, launchobserver.lat, launchobserver.sidereal_time())
+        staralt = round(staralt, 2)
+        staraz = round(staraz, 2)
+        self.slewstarwindow= Toplevel(root)
+        self.slewstarwindow.geometry('200x220')
+        self.slewstarwindow.title("Slew to Star?")
+        trackSettings.slewTarget = ''
+        trackSettings.slewDistance = 0
+        try:
+            mtelra = self.tel.RightAscension*15
+            mteldec = self.tel.Declination
+            #print(mtelra, mteldec)
+            currentsep = ephem.separation((math.radians(mtelra),math.radians(mteldec)),(math.radians(starRA),math.radians(starDec)))
+            currentsep = math.degrees(currentsep)
+            trackSettings.syncDistance = round((currentsep*3600),1)
+            currentsep = round(currentsep,2)
+            trackSettings.slewRA = starRA
+            trackSettings.slewDec = starDec
+            trackSettings.syncRA = starRA
+            trackSettings.syncDec = starDec
+            self.slewtargetLabel = Label(self.slewstarwindow, text=str('Slew Target: '+str(starname)))
+            self.slewtargetLabel.grid(row = 0, column = 0)
+            self.slewaltLabel = Label(self.slewstarwindow, text=str('Target Altitude: '+str(staralt)))
+            self.slewaltLabel.grid(row = 1, column = 0)
+            self.slewazLabel = Label(self.slewstarwindow, text=str('Target Azimuth: '+str(staraz)))
+            self.slewazLabel.grid(row=2, column =0)
+            self.slewsepLabel = Label(self.slewstarwindow, text=str('Target Magnitude: '+str(starmag)))
+            self.slewsepLabel.grid(row = 3, column = 0)
+            self.slewButton = Button(self.slewstarwindow, text=str('Slew!'),command = self.slewtoStar)
+            self.slewButton.grid(row = 4, column = 0)
+            self.abortslewButton = Button(self.slewstarwindow, text=str('Abort Slew!'),command = self.abortSlew)
+            self.abortslewButton.grid(row = 5, column = 0)
+            self.slewsepLabel = Label(self.slewstarwindow, text=str('Slew Distance (degrees): '+str(currentsep)))
+            self.slewsepLabel.grid(row = 6, column = 0)
+            self.clicksyncsepLabel = Label(self.slewstarwindow, text=str('Sync Distance (arcseconds): '+str(trackSettings.syncDistance)))
+            self.clicksyncsepLabel.grid(row = 7, column = 0)
+            self.clicksyncButton = Button(self.slewstarwindow, text=str('Sync on '+str(starname)),command = self.syncNow)
+            self.clicksyncButton.grid(row = 8, column = 0)
+        except:
+            trackSettings.slewTarget='Unable To Slew Without'
+            targetline2 = 'A Connected ASCOM Telescope'
+            self.slewtargetLabel = Label(self.slewstarwindow, text=str(trackSettings.slewTarget))
+            self.slewtargetLabel.grid(row = 0, column = 0)
+            self.slewaltLabel = Label(self.slewstarwindow, text=str(targetline2))
+            self.slewaltLabel.grid(row = 1, column = 0)
+    
+    def ASCOMSlew(self):
+        trackSettings.slewCompleted = False
+        if trackSettings.goforSlew is True:
+            trackSettings.slewCompleted = False
+            self.tel.SlewToCoordinates((math.degrees(self.raslew)/15),math.degrees(self.decslew))
+            trackSettings.goforSlew = False
+            trackSettings.slewCompleted = True
+            time.sleep(1)
+            trackSettings.slewCompleted = False
+    
+    def abortSlew(self):
+        if self.tel.Connected is True:
+            self.tel.AbortSlew()
+            trackSettings.slewCompleted = True
+            time.sleep(1)
+            trackSettings.slewCompleted = False
+    
+    def slewtoStar(self):
+        if self.tel.Connected is True:
+            constnow = datetime.datetime.utcnow()
+            launchobserver = ephem.Observer()
+            launchobserver.lat = (str(self.entryLat.get()))
+            launchobserver.lon = (str(self.entryLon.get()))
+            launchobserver.date = constnow
+            launchobserver.pressure = trackSettings.pressure
+            launchobserver.temp = trackSettings.temperature
+            launchobserver.epoch = launchobserver.date
+            starDec = math.radians(trackSettings.slewDec)
+            starRA = math.radians(trackSettings.slewRA)
+            staralt, staraz = self.equatorial_to_horizon(starDec, starRA, launchobserver.lat, launchobserver.sidereal_time())
+            ref_tel_alt = staralt
+            ref_tel_az = staraz
+            weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+            #We're correcting the star alt/az, not the telescope, so subtract the delta
+            correctedaz = ref_tel_az - weighted_avg_az_sep
+            correctedalt = ref_tel_alt - weighted_avg_alt_sep
+            refraction = self.atm_refraction(correctedalt)
+            correctedalt += refraction
+            launchobserver.pressure = 0.0
+            raslew, decslew = launchobserver.radec_of(math.radians(correctedaz), math.radians(correctedalt))
+            print(weighted_avg_alt_sep, weighted_avg_az_sep, staralt, staraz, correctedalt, correctedaz)
+            self.raslew = raslew
+            self.decslew = decslew
+            trackSettings.goforSlew = True
+            self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+            self.ASCOMSlewThread.start()
+            #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+            
+        else:
+            print('You Need To Connect Telescope First')
+            
+    
+    def setStarMapRender(self):
+        if trackSettings.renderStarMap is False:
+            trackSettings.renderStarMap = True
+            self.renderMapButton.configure(text='Pause All Sky View')
+            self.renderMapThread = threading.Thread(target=self.render_starMap)
+            self.renderMapThread.start()
+        else:
+            self.renderMapButton.configure(text='Render All Sky View')
+            trackSettings.renderStarMap = False
+    
+    def starMap(self):
+        self.starmapwindow= Toplevel(root)
+        mapwindowsize = int(int(self.starmapsize)+100)
+        self.starmapwindow.geometry(str(str(mapwindowsize)+"x"+str(mapwindowsize)))
+        self.starmapwindow.title("Planetarium Window")
+        self.starmaptopframe = Frame(self.starmapwindow)
+        self.starmaptopframe.pack(side=TOP)
+        self.starmapbottomframe = Frame(self.starmapwindow)
+        self.starmapbottomframe.pack(side=BOTTOM)
+        self.renderMapButton = Button(self.starmapbottomframe, text='Render All Sky View', command=self.setStarMapRender)
+        self.renderMapButton.grid(row=0, column = 1)
+        self.maglimitlabel = Label(self.starmapbottomframe, text='Magnitude Limit')
+        self.maglimitlabel.grid(row = 1, column = 0)
+        self.entrymaglimit = Entry(self.starmapbottomframe)
+        self.entrymaglimit.grid(row = 1, column = 1)
+        self.entrymaglimit.insert(0, trackSettings.maglimit)
+        self.boresightsyncButton = Button(self.starmapbottomframe, text='Sync on Nearest Star', command=self.boresightSyncPopUp)
+        self.boresightsyncButton.grid(row=2, column = 1)
+
+    def correctionList(self):
+        self.correctionListWindow = Toplevel(root)
+        self.correctionListWindow.geometry("800x400")
+        self.correctionListWindow.title("Pointing Correction List")
+        # Create a frame to hold the treeview and the delete buttons
+        main_frame = tk.Frame(self.correctionListWindow)
+        main_frame.pack(fill=tk.BOTH, expand=True)    
+        # Create a treeview widget
+        self.tree = ttk.Treeview(main_frame, columns=("alt sep", "az sep", "tel alt", "tel az"), show='headings', height=15)
+        self.tree.heading("alt sep", text="Altitude Error")
+        self.tree.heading("az sep", text="Azimuth Error")
+        self.tree.heading("tel alt", text="Telescope Altitude")
+        self.tree.heading("tel az", text="Telescope Azimuth")
+        self.tree.grid(row=0, column=0, sticky='nsew')
+
+        # Configure treeview column sizes
+        self.tree.column("alt sep", width=150)
+        self.tree.column("az sep", width=150)
+        self.tree.column("tel alt", width=150)
+        self.tree.column("tel az", width=150)
+
+        # Add scrollbars
+        scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+
+        # Frame for delete buttons
+        self.button_frame = tk.Frame(main_frame)
+        self.button_frame.grid(row=0, column=2, sticky='ns')
+
+        # Populate the treeview with rows from the dataframe
+        self.tree_data = {}
+        for i, row in self.pointingerrorDF.iterrows():
+            self.insert_row(i, row)
+
+        # Make rows expandable
+        main_frame.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+    
+    def insert_row(self, index, row):
+        #Inserts a row into the treeview with a delete button.
+
+        tree_id = self.tree.insert('', 'end', values=(row['alt sep'], row['az sep'], row['tel alt'], row['tel az']))
+        self.tree_data[tree_id] = index
+
+        # Add delete button
+        delete_button = tk.Button(self.button_frame, text="Delete", command=lambda tid=tree_id: self.delete_row(tid))
+        delete_button.grid(row=len(self.tree_data) - 1, column=0, sticky='ew')
+
+    def delete_row(self, tree_id):
+        #Deletes the selected row from the treeview and updates the dataframe.
+        index = self.tree_data[tree_id]
+        self.pointingerrorDF = self.pointingerrorDF.drop(index).reset_index(drop=True)
+        self.pointingerrorDF.to_csv('telpoints.csv',index=False)
+        self.refresh_tree()
+
+    def refresh_tree(self):
+        #Refreshes the treeview and delete buttons after a row is deleted.
+        # Clear the treeview
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        # Clear the button frame
+        for widget in self.button_frame.winfo_children():
+            widget.destroy()
+
+        # Reset tree_data and repopulate
+        self.tree_data = {}
+        for i, row in self.pointingerrorDF.iterrows():
+            self.insert_row(i, row)
         
     def LaunchSelect(self, event):
         indexnumber = self.LAUNCHES.index(self.droplist.get())
@@ -1096,6 +1738,7 @@ class buttons:
 
     def arm_launch_tracking(self):
         if trackSettings.runningsimulation is False and trackSettings.runninglaunch is False and trackSettings.fileSelected is True:
+            trackSettings.cancelLaunch = False
             trackSettings.runninglaunch = True
             if len(self.joysticks) == 0 and trackSettings.joystickconnected is False:
                 print('Connect Joystick And Restart Program!')
@@ -1119,14 +1762,8 @@ class buttons:
             trackSettings.runninglaunch = False
             trackSettings.buttonpushed = False
             trackSettings.feedingdata = False
+            trackSettings.cancelLaunch = True
             self.launchButton.configure(text='Arm Launch Tracking')
-    
-    def atm_refraction(self, altitude):
-        if altitude>15:
-            refraction = 0.00452*trackSettings.pressure*math.tan(math.radians((90-altitude)/(273+trackSettings.temperature)))
-        else:
-            refraction = (trackSettings.pressure*(0.1594+(0.0196*altitude)+(0.00002*altitude**2)))/((273+trackSettings.temperature)*(1+(0.505*altitude)+(0.0845*altitude**2)))
-        return(refraction)
         
     def run_launch(self):
         self.t0 = self.entryNET.get()
@@ -1176,12 +1813,25 @@ class buttons:
                         trackSettings.buttonpushed = True
                 except:
                     pass
-        initialtime = datetime.datetime.utcnow()
+        #Use button push time UNLESS you're using the computer clock, then get the entered t0 time instead
+        if self.usecountdown.get() == 0:
+            initialtime = datetime.datetime.utcnow()
+        else:
+            #We're using the computer clock, so check t0 time one more time from text entry box and use that, but if it's been corrupted use the original t0 time
+            try:
+                finalt0 = self.entryNET.get()
+                finalt0 = datetime.datetime.strptime(self.t0, '%Y-%m-%dT%H:%M:%SZ')
+            except:
+                finalt0 = self.t0
+            initialtime = finalt0
         trackSettings.launchtime = initialtime
         endoffile = False
         timedeltalast = 0
-        self.lastaz = self.tel.Azimuth
-        self.lastalt = self.tel.Altitude
+        ref_tel_alt = self.tel.Altitude
+        ref_tel_az = self.tel.Azimuth
+        weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+        self.lastaz = ref_tel_az + weighted_avg_az_sep
+        self.lastalt = ref_tel_alt + weighted_avg_alt_sep
         ####Do this if we're set to wait at the horizon mode###
         if trackSettings.trackingmode == 'Horizon':
             if trackSettings.fileSelected is True:
@@ -1199,7 +1849,7 @@ class buttons:
                     rowalt = float(row['elevationDegs'])
                     refraction = self.atm_refraction(rowalt)
                     rowalt = rowalt+refraction
-                    if rowalt > trackSettings.horizonaltitude and self.horizonalt < -990:
+                    if rowalt > trackSettings.horizonaltitude and self.horizonalt < -990 and trackSettings.cancelLaunch is False:
                         waittime = row['time']
                         startgoingtime = initialtime + datetime.timedelta(seconds=waittime)
                         thisrowalt = float(row['elevationDegs'])
@@ -1216,7 +1866,14 @@ class buttons:
                         raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
                         self.textbox.insert(END, str('Slew Alt: ' + str(round(self.horizonalt,2)) + ' Slew Az: ' + str(round(horizonaz,2)) +' Slew RA: ' + str(round((math.degrees(raslew)/15),2))+' hrs Slew Dec: ' + str(round(math.degrees(decslew),2))+'\n'))
                         self.textbox.see('end')
-                        self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+                        self.raslew = raslew
+                        self.decslew = decslew
+                        trackSettings.goforSlew = True
+                        self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+                        self.ASCOMSlewThread.start()
+                        #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+                        while trackSettings.slewCompleted is False:
+                            time.sleep(0.01)
                         self.tel.MoveAxis(0, 0)
                         self.tel.MoveAxis(1, 0)
                     thisrowalt = float(row['elevationDegs'])
@@ -1233,116 +1890,122 @@ class buttons:
                 r, c = df.shape
                 currenttime = datetime.datetime.utcnow()
                 if currenttime > startgoingtime:
-                    launchobserver.date = datetime.datetime.utcnow()
-                    timedelta = (currenttime - initialtime).total_seconds()
-                    onesecondlater = ((currenttime - initialtime).total_seconds()+1)
-                    twosecondslater = onesecondlater+1
-                    hours = timedelta // 3600
-                    minutes = (timedelta % 3600) // 60
-                    seconds = timedelta % 60
-                    self.countdowntext.set(str('t+ '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
-                    timedelta2 = timedelta - timedeltalast
-                    timedeltalast = timedelta
-                    df_sort = df.iloc[(df['time']-timedelta).abs().argsort()[:2]]
-                    df_sort = df_sort.sort_values(by=['time'])
-                    #Find the row exactly 1 second later to be able to compute degrees per second
-                    df_sort2 = df.iloc[(df['time']-onesecondlater).abs().argsort()[:2]]
-                    df_sort2 = df_sort2.sort_values(by=['time'])
-                    df_sort3 = df.iloc[(df['time']-twosecondslater).abs().argsort()[:2]]
-                    df_sort3 = df_sort3.sort_values(by=['time'])
-                    altlist1 = []
-                    azlist1 = []
-                    timelist = []
-                    #Convert absolute coordinates to relative rates
-                    index = 0
-                    predictedalt = float(df_sort.iloc[index].loc['elevationDegs'])
-                    refraction = self.atm_refraction(predictedalt)
-                    predictedalt = predictedalt+refraction
-                    predictedaz = float(df_sort.iloc[index].loc['azimuthDegs'])
-                    nextpredictedalt = float(df_sort2.iloc[index].loc['elevationDegs'])
-                    nextrefraction = self.atm_refraction(nextpredictedalt)
-                    nextpredictedalt = nextpredictedalt+nextrefraction
-                    thirdpredictedalt = float(df_sort3.iloc[index].loc['elevationDegs'])
-                    thirdrefraction = self.atm_refraction(thirdpredictedalt)
-                    thirdpredictedalt = thirdpredictedalt+thirdrefraction
-                    nextpredictedaz = float(df_sort2.iloc[index].loc['azimuthDegs'])
-                    thirdpredictedaz = float(df_sort3.iloc[index].loc['azimuthDegs'])
-                    currentpredicttime = float(df_sort.iloc[index].loc['time'])
-                    nextpredicttime = float(df_sort2.iloc[index].loc['time'])
-                    thirdpredicttime = float(df_sort3.iloc[index].loc['time'])
-                    altrate = nextpredictedalt - predictedalt
-                    nextaltrate = thirdpredictedalt - nextpredictedalt
-                    #Now I'm using df_sort2 as index+1 because df_sort2 actually finds the closest value to 1 second later, the next row of df_sort isn't NECESSARILY one second later
-                    headingeast = ((df_sort2.iloc[index].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])
-                    headingwest = (df_sort2.iloc[index].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))
-                    nextheadingeast = ((df_sort3.iloc[index].loc['azimuthDegs'] + 360)-df_sort2.iloc[index].loc['azimuthDegs'])
-                    nextheadingwest = (df_sort3.iloc[index].loc['azimuthDegs'] - (df_sort2.iloc[index].loc['azimuthDegs']+360))
-                    azrate = df_sort2.iloc[index].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs']
-                    nextazrate = thirdpredictedaz - nextpredictedaz
-                    if abs(nextheadingeast) < abs(nextazrate):
-                        nextazrate = nextheadingeast
-                    elif abs(nextheadingwest) < abs(nextazrate):
-                        nextazrate = nextheadingwest      
-                    if abs(headingeast) < abs(azrate):
-                        azrate = headingeast
-                    elif abs(headingwest) < abs(azrate):
-                        azrate = headingwest      
-                    #Interpolate current alt and az rates!
-                    altrate = altrate + (timedelta-currentpredicttime)*((nextaltrate-altrate)/(nextpredicttime-currentpredicttime))
-                    azrate = azrate + (timedelta-currentpredicttime)*((nextazrate-azrate)/(nextpredicttime-currentpredicttime))
-                    #Check if we're doing a spiral search and update the spiral vector if so#############################################
-                    if trackSettings.joystickconnected is False:
-                        joyspiral = self.joysticks[0].get_button(trackSettings.spiralbutton)
-                    else:
-                    #PLACEHOLDER UNTIL I UPDATE THE REMOTE JOY SERVER TO HAVE A SPIRAL BUTTON
-                        joyspiral = 0
-                    if joyspiral == 1 and trackSettings.lastspiralbutton == 0:
-                        self.start_spiral_search()
-                        trackSettings.lastspiralbutton = 1
-                    elif joyspiral == 0 and trackSettings.lastspiralbutton == 1:
-                        trackSettings.lastspiralbutton = 0
-                    if trackSettings.spiralSearch is True:
-                        circlecircumference = 2*math.pi*self.currentspiralradius
-                        amounttorotate = (((trackSettings.spiralRadius/circlecircumference)*360)*timedelta2)
-                        #amounttoextend = (trackSettings.spiralRadius/(360/amounttorotate))*timedelta2
-                        self.currentspiraldegree += amounttorotate
-                        if self.currentspiraldegree > 360:
-                            self.currentspiraldegree -= 360
-                            self.currentspiralradius += trackSettings.spiralRadius
-                        altpoint = self.currentspiralradius * math.sin(math.radians(self.currentspiraldegree))
-                        azpoint = (self.currentspiralradius * math.cos(math.radians(self.currentspiraldegree)))*(1/math.cos(math.radians(predictedalt)))
-                        altpoint = predictedalt + altpoint
-                        azpoint = predictedaz + azpoint
-                        self.spiralalt, self.spiralaz = altpoint, azpoint
-                        #print(predictedalt, predictedaz, altpoint, azpoint)
-                        #print(self.currentspiraldegree, self.currentspiralradius)
-                    #These should be the absolute coordinates but just store relative rates for now
-                    alt = altrate
-                    az = azrate
-                    #Check to see if joystick button was pushed to switch over to manual tracking
-                    pygame.event.pump()
-                    if trackSettings.joystickconnected is False:
-                        if self.joysticks[0].get_button(trackSettings.gomanualbutton) > 0:
+                    try:
+                        launchobserver.date = datetime.datetime.utcnow()
+                        timedelta = (currenttime - initialtime).total_seconds()
+                        onesecondlater = ((currenttime - initialtime).total_seconds()+1)
+                        twosecondslater = onesecondlater+1
+                        hours = timedelta // 3600
+                        minutes = (timedelta % 3600) // 60
+                        seconds = timedelta % 60
+                        self.countdowntext.set(str('t+ '+str(math.trunc(hours))+' hours '+str(math.trunc(minutes))+' minutes '+str(math.trunc(seconds))+' seconds'))
+                        timedelta2 = timedelta - timedeltalast
+                        timedeltalast = timedelta
+                        df_sort = df.iloc[(df['time']-timedelta).abs().argsort()[:2]]
+                        df_sort = df_sort.sort_values(by=['time'])
+                        #Find the row exactly 1 second later to be able to compute degrees per second
+                        df_sort2 = df.iloc[(df['time']-onesecondlater).abs().argsort()[:2]]
+                        df_sort2 = df_sort2.sort_values(by=['time'])
+                        df_sort3 = df.iloc[(df['time']-twosecondslater).abs().argsort()[:2]]
+                        df_sort3 = df_sort3.sort_values(by=['time'])
+                        altlist1 = []
+                        azlist1 = []
+                        timelist = []
+                        #Convert absolute coordinates to relative rates
+                        index = 0
+                        predictedalt = float(df_sort.iloc[index].loc['elevationDegs'])
+                        refraction = self.atm_refraction(predictedalt)
+                        predictedalt = predictedalt+refraction
+                        predictedaz = float(df_sort.iloc[index].loc['azimuthDegs'])
+                        nextpredictedalt = float(df_sort2.iloc[index].loc['elevationDegs'])
+                        nextrefraction = self.atm_refraction(nextpredictedalt)
+                        nextpredictedalt = nextpredictedalt+nextrefraction
+                        thirdpredictedalt = float(df_sort3.iloc[index].loc['elevationDegs'])
+                        thirdrefraction = self.atm_refraction(thirdpredictedalt)
+                        thirdpredictedalt = thirdpredictedalt+thirdrefraction
+                        nextpredictedaz = float(df_sort2.iloc[index].loc['azimuthDegs'])
+                        thirdpredictedaz = float(df_sort3.iloc[index].loc['azimuthDegs'])
+                        currentpredicttime = float(df_sort.iloc[index].loc['time'])
+                        nextpredicttime = float(df_sort2.iloc[index].loc['time'])
+                        thirdpredicttime = float(df_sort3.iloc[index].loc['time'])
+                        #Account for possible unstable increments in time to get degrees per second
+                        nexttimediff = nextpredicttime - currentpredicttime
+                        thirdtimediff = thirdpredicttime - nextpredicttime
+                        altrate = (nextpredictedalt - predictedalt)/nexttimediff
+                        nextaltrate = (thirdpredictedalt - nextpredictedalt)/thirdtimediff
+                        #Now I'm using df_sort2 as index+1 because df_sort2 actually finds the closest value to 1 second later, the next row of df_sort isn't NECESSARILY one second later
+                        headingeast = ((df_sort2.iloc[index].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])/nexttimediff
+                        headingwest = (df_sort2.iloc[index].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))/nexttimediff
+                        nextheadingeast = ((df_sort3.iloc[index].loc['azimuthDegs'] + 360)-df_sort2.iloc[index].loc['azimuthDegs'])/thirdtimediff
+                        nextheadingwest = (df_sort3.iloc[index].loc['azimuthDegs'] - (df_sort2.iloc[index].loc['azimuthDegs']+360))/thirdtimediff
+                        azrate = (df_sort2.iloc[index].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs'])/nexttimediff
+                        nextazrate = (thirdpredictedaz - nextpredictedaz)/thirdtimediff
+                        if abs(nextheadingeast) < abs(nextazrate):
+                            nextazrate = nextheadingeast
+                        elif abs(nextheadingwest) < abs(nextazrate):
+                            nextazrate = nextheadingwest      
+                        if abs(headingeast) < abs(azrate):
+                            azrate = headingeast
+                        elif abs(headingwest) < abs(azrate):
+                            azrate = headingwest      
+                        #Interpolate current alt and az rates!
+                        altrate = altrate + (timedelta-currentpredicttime)*((nextaltrate-altrate)/(nextpredicttime-currentpredicttime))
+                        azrate = azrate + (timedelta-currentpredicttime)*((nextazrate-azrate)/(nextpredicttime-currentpredicttime))
+                        #Check if we're doing a spiral search and update the spiral vector if so#############################################
+                        if trackSettings.joystickconnected is False:
+                            joyspiral = self.joysticks[0].get_button(trackSettings.spiralbutton)
+                        else:
+                        #PLACEHOLDER UNTIL I UPDATE THE REMOTE JOY SERVER TO HAVE A SPIRAL BUTTON
+                            joyspiral = 0
+                        if joyspiral == 1 and trackSettings.lastspiralbutton == 0:
+                            self.start_spiral_search()
+                            trackSettings.lastspiralbutton = 1
+                        elif joyspiral == 0 and trackSettings.lastspiralbutton == 1:
+                            trackSettings.lastspiralbutton = 0
+                        if trackSettings.spiralSearch is True:
+                            circlecircumference = 2*math.pi*self.currentspiralradius
+                            amounttorotate = (((trackSettings.spiralRadius/circlecircumference)*360)*timedelta2)
+                            #amounttoextend = (trackSettings.spiralRadius/(360/amounttorotate))*timedelta2
+                            self.currentspiraldegree += amounttorotate
+                            if self.currentspiraldegree > 360:
+                                self.currentspiraldegree -= 360
+                                self.currentspiralradius += trackSettings.spiralRadius
+                            altpoint = self.currentspiralradius * math.sin(math.radians(self.currentspiraldegree))
+                            azpoint = (self.currentspiralradius * math.cos(math.radians(self.currentspiraldegree)))*(1/math.cos(math.radians(predictedalt)))
+                            altpoint = predictedalt + altpoint
+                            azpoint = predictedaz + azpoint
+                            self.spiralalt, self.spiralaz = altpoint, azpoint
+                            #print(predictedalt, predictedaz, altpoint, azpoint)
+                            #print(self.currentspiraldegree, self.currentspiralradius)
+                        #These should be the absolute coordinates but just store relative rates for now
+                        alt = altrate
+                        az = azrate
+                        #Check to see if joystick button was pushed to switch over to manual tracking
+                        pygame.event.pump()
+                        if trackSettings.joystickconnected is False:
+                            if self.joysticks[0].get_button(trackSettings.gomanualbutton) > 0:
+                                timedelta = r+1
+                        elif self.remotejoybutton3 > 0:
                             timedelta = r+1
-                    elif self.remotejoybutton3 > 0:
-                        timedelta = r+1
-                    #check to see if we reached the end of the interpolation, remember to account for extra 20 seconds before launch)
-                    if (timedelta+2) > (r):
-                        endoffile = True
-                        trackSettings.runninglaunch = False
-                        trackSettings.buttonpushed = False
-                        trackSettings.feedingdata = False
-                        self.launchButton.configure(text='Arm Launch Tracking')
-                        trackSettings.joytracking = True
-                        self.trackthread = threading.Thread(target=self.track)
-                        self.startButton4.configure(text='Stop Joystick Tracking')
-                        self.trackthread.start()
-                    if math.isinf(altrate) or math.isinf(azrate):
+                        #check to see if we reached the end of the interpolation, remember to account for extra 20 seconds before launch)
+                        if (timedelta+2) > (r):
+                            endoffile = True
+                            trackSettings.runninglaunch = False
+                            trackSettings.buttonpushed = False
+                            trackSettings.feedingdata = False
+                            self.launchButton.configure(text='Arm Launch Tracking')
+                            trackSettings.joytracking = True
+                            self.trackthread = threading.Thread(target=self.track)
+                            self.startButton4.configure(text='Stop Joystick Tracking')
+                            self.trackthread.start()
+                        if math.isinf(altrate) or math.isinf(azrate):
+                            pass
+                        else:
+                            #print(timedelta, alt, az, altrate, azrate)
+                            self.timedeltaout, self.altout, self.azout, self.altrateout, self.azrateout, self.predictalt, self.predictaz, self.nextpredictedalt, self.nextpredictedaz, self.currentpredicttime, self.nextpredicttime, self.thirdpredictedalt, self.thirdpredictedaz, self.thirdpredicttime = timedelta, alt, az, altrate, azrate, predictedalt, predictedaz, nextpredictedalt, nextpredictedaz, currentpredicttime, nextpredicttime, thirdpredictedalt, thirdpredictedaz, thirdpredicttime
+                            trackSettings.feedingdata = True
+                    except:
                         pass
-                    else:
-                        #print(timedelta, alt, az, altrate, azrate)
-                        self.timedeltaout, self.altout, self.azout, self.altrateout, self.azrateout, self.predictalt, self.predictaz, self.nextpredictedalt, self.nextpredictedaz, self.currentpredicttime, self.nextpredicttime, self.thirdpredictedalt, self.thirdpredictedaz, self.thirdpredicttime = timedelta, alt, az, altrate, azrate, predictedalt, predictedaz, nextpredictedalt, nextpredictedaz, currentpredicttime, nextpredicttime, thirdpredictedalt, thirdpredictedaz, thirdpredicttime
-                        trackSettings.feedingdata = True
                 else:
                     timedelta = (startgoingtime - currenttime).total_seconds()
                     hours = timedelta // 3600
@@ -1385,7 +2048,14 @@ class buttons:
                                 launchobserver.pressure = 0
                                 launchobserver.epoch = launchobserver.date
                                 raslew, decslew = launchobserver.radec_of(math.radians(horizonaz), math.radians(self.horizonalt))
-                                self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+                                self.raslew = raslew
+                                self.decslew = decslew
+                                trackSettings.goforSlew = True
+                                self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+                                self.ASCOMSlewThread.start()
+                                #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
+                                while trackSettings.slewCompleted is False:
+                                    time.sleep(0.01)
                                 self.tel.MoveAxis(0, 0)
                                 self.tel.MoveAxis(1, 0)
                             thisrowalt = float(row['elevationDegs'])
@@ -1441,6 +2111,11 @@ class buttons:
                 altlast = altlist1[0]
                 azlast = azlist1[0]
                 #Sync to pad location
+                ref_tel_alt = self.tel.Altitude
+                ref_tel_az = self.tel.Azimuth
+                weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                azlast = azlast - weighted_avg_az_sep
+                altlast = altlast - weighted_avg_alt_sep
                 launchobserver = ephem.Observer()
                 launchobserver.lat = (str(self.entryLat.get()))
                 launchobserver.lon = (str(self.entryLon.get()))
@@ -1476,8 +2151,11 @@ class buttons:
                 #Find minimum difference between current position and time to df
                 mindiff = 99999999999999999
                 mindiffindex = 0
-                currentaz = self.tel.Azimuth
-                currentalt = self.tel.Altitude
+                ref_tel_alt = self.tel.Altitude
+                ref_tel_az = self.tel.Azimuth
+                weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                currentaz = ref_tel_az + weighted_avg_az_sep
+                currentalt = ref_tel_alt + weighted_avg_alt_sep
                 try:
                     for index, row in df.iterrows():
                         thisrowalt = float(row['elevationDegs'])
@@ -1513,7 +2191,7 @@ class buttons:
                     az = azrate
                     #Check to see if joystick button was pushed to switch over to manual tracking
                     pygame.event.pump()
-                    if self.joysticks[0].get_button(7) > 0:
+                    if self.joysticks[0].get_button(trackSettings.gomanualbutton) > 0:
                         currentindex = r+999999999999999999999999999999
                     #check to see if we reached the end of the interpolation, remember to account for extra 20 seconds before launch)
                     if currentindex > (r):
@@ -1551,13 +2229,38 @@ class buttons:
                     azlist1.append(row['azimuthDegs'])
                 altlast = altlist1[0]
                 azlast = azlist1[0]
+                #Sync to pad location
+                ref_tel_alt = self.tel.Altitude
+                ref_tel_az = self.tel.Azimuth
+                weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                azlast = azlast - weighted_avg_az_sep
+                altlast = altlast - weighted_avg_alt_sep
+                
+                launchobserver = ephem.Observer()
+                launchobserver.lat = (str(self.entryLat.get()))
+                launchobserver.lon = (str(self.entryLon.get()))
+                launchobserver.date = datetime.datetime.utcnow()
+                launchobserver.pressure = 0
+                launchobserver.epoch = launchobserver.date
+                rasync, decsync = launchobserver.radec_of(math.radians(azlast), math.radians(altlast))
+                self.tel.SyncToCoordinates((math.degrees(rasync)/15), math.degrees(decsync))
+                
+                launchobserver = ephem.Observer()
+                launchobserver.lat = (str(self.entryLat.get()))
+                launchobserver.lon = (str(self.entryLon.get()))
+                launchobserver.date = datetime.datetime.utcnow()
+                launchobserver.pressure = trackSettings.pressure
+                launchobserver.epoch = launchobserver.date
             else:
                 endoffile = True
             while trackSettings.runninglaunch is True and endoffile is False:
                 time.sleep(0.001)
                 r, c = df.shape
                 currenttime = datetime.datetime.utcnow()
+                launchobserver.date = datetime.datetime.utcnow()
                 timedelta = (currenttime - initialtime).total_seconds()
+                onesecondlater = ((currenttime - initialtime).total_seconds()+1)
+                twosecondslater = onesecondlater+1
                 hours = timedelta // 3600
                 minutes = (timedelta % 3600) // 60
                 seconds = timedelta % 60
@@ -1566,6 +2269,11 @@ class buttons:
                 timedeltalast = timedelta
                 df_sort = df.iloc[(df['time']-timedelta).abs().argsort()[:2]]
                 df_sort = df_sort.sort_values(by=['time'])
+                #Find the row exactly 1 second later to be able to compute degrees per second
+                df_sort2 = df.iloc[(df['time']-onesecondlater).abs().argsort()[:2]]
+                df_sort2 = df_sort2.sort_values(by=['time'])
+                df_sort3 = df.iloc[(df['time']-twosecondslater).abs().argsort()[:2]]
+                df_sort3 = df_sort3.sort_values(by=['time'])
                 altlist1 = []
                 azlist1 = []
                 timelist = []
@@ -1575,25 +2283,46 @@ class buttons:
                 refraction = self.atm_refraction(predictedalt)
                 predictedalt = predictedalt+refraction
                 predictedaz = float(df_sort.iloc[index].loc['azimuthDegs'])
-                nextpredictedalt = float(df_sort.iloc[index+1].loc['elevationDegs'])
+                nextpredictedalt = float(df_sort2.iloc[index].loc['elevationDegs'])
                 nextrefraction = self.atm_refraction(nextpredictedalt)
                 nextpredictedalt = nextpredictedalt+nextrefraction
-                altrate = nextpredictedalt - predictedalt
-                predictedaz = df_sort.iloc[index].loc['azimuthDegs']
-                #altrate = df_sort.iloc[index+1].loc['elevationDegs'] - df_sort.iloc[index].loc['elevationDegs']
-                headingeast = ((df_sort.iloc[index+1].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])
-                headingwest = (df_sort.iloc[index+1].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))
-                azrate = df_sort.iloc[index+1].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs']
+                thirdpredictedalt = float(df_sort3.iloc[index].loc['elevationDegs'])
+                thirdrefraction = self.atm_refraction(thirdpredictedalt)
+                thirdpredictedalt = thirdpredictedalt+thirdrefraction
+                nextpredictedaz = float(df_sort2.iloc[index].loc['azimuthDegs'])
+                thirdpredictedaz = float(df_sort3.iloc[index].loc['azimuthDegs'])
+                currentpredicttime = float(df_sort.iloc[index].loc['time'])
+                nextpredicttime = float(df_sort2.iloc[index].loc['time'])
+                thirdpredicttime = float(df_sort3.iloc[index].loc['time'])
+                #Account for possible unstable increments in time to get degrees per second
+                nexttimediff = nextpredicttime - currentpredicttime
+                thirdtimediff = thirdpredicttime - nextpredicttime
+                altrate = (nextpredictedalt - predictedalt)/nexttimediff
+                nextaltrate = (thirdpredictedalt - nextpredictedalt)/thirdtimediff
+                #Now I'm using df_sort2 as index+1 because df_sort2 actually finds the closest value to 1 second later, the next row of df_sort isn't NECESSARILY one second later
+                headingeast = ((df_sort2.iloc[index].loc['azimuthDegs'] + 360)-df_sort.iloc[index].loc['azimuthDegs'])/nexttimediff
+                headingwest = (df_sort2.iloc[index].loc['azimuthDegs'] - (df_sort.iloc[index].loc['azimuthDegs']+360))/nexttimediff
+                nextheadingeast = ((df_sort3.iloc[index].loc['azimuthDegs'] + 360)-df_sort2.iloc[index].loc['azimuthDegs'])/thirdtimediff
+                nextheadingwest = (df_sort3.iloc[index].loc['azimuthDegs'] - (df_sort2.iloc[index].loc['azimuthDegs']+360))/thirdtimediff
+                azrate = (df_sort2.iloc[index].loc['azimuthDegs'] - df_sort.iloc[index].loc['azimuthDegs'])/nexttimediff
+                nextazrate = (thirdpredictedaz - nextpredictedaz)/thirdtimediff
+                if abs(nextheadingeast) < abs(nextazrate):
+                    nextazrate = nextheadingeast
+                elif abs(nextheadingwest) < abs(nextazrate):
+                    nextazrate = nextheadingwest      
                 if abs(headingeast) < abs(azrate):
                     azrate = headingeast
                 elif abs(headingwest) < abs(azrate):
-                    azrate = headingwest                    
+                    azrate = headingwest      
+                #Interpolate current alt and az rates!
+                altrate = altrate + (timedelta-currentpredicttime)*((nextaltrate-altrate)/(nextpredicttime-currentpredicttime))
+                azrate = azrate + (timedelta-currentpredicttime)*((nextazrate-azrate)/(nextpredicttime-currentpredicttime))                
                 #These should be the absolute coordinates but just store relative rates for now
                 alt = altrate
                 az = azrate
                 #Check to see if joystick button was pushed to switch over to manual tracking
                 pygame.event.pump()
-                if self.joysticks[0].get_button(7) > 0:
+                if self.joysticks[0].get_button(trackSettings.gomanualbutton) > 0:
                     timedelta = r+1
                 #check to see if we reached the end of the interpolation, remember to account for extra 20 seconds before launch)
                 if timedelta > (r):
@@ -1610,7 +2339,8 @@ class buttons:
                     pass
                 else:
                     #print(timedelta, alt, az, altrate, azrate)
-                    self.timedeltaout, self.altout, self.azout, self.altrateout, self.azrateout = timedelta, alt, az, altrate, azrate
+                    #self.timedeltaout, self.altout, self.azout, self.altrateout, self.azrateout = timedelta, alt, az, altrate, azrate
+                    self.timedeltaout, self.altout, self.azout, self.altrateout, self.azrateout, self.predictalt, self.predictaz, self.nextpredictedalt, self.nextpredictedaz, self.currentpredicttime, self.nextpredicttime, self.thirdpredictedalt, self.thirdpredictedaz, self.thirdpredicttime = timedelta, alt, az, altrate, azrate, predictedalt, predictedaz, nextpredictedalt, nextpredictedaz, currentpredicttime, nextpredicttime, thirdpredictedalt, thirdpredictedaz, thirdpredicttime
                     trackSettings.feedingdata = True
         trackSettings.feedingdata = False
                 
@@ -2012,14 +2742,18 @@ class buttons:
                             elif trackSettings.predictionLock is True:
                                 #Get time interval - initialize the "last time" using the "start_prediction_lock" function above
                                 currentpredictiontime = datetime.datetime.utcnow()
-                                currentalt = self.tel.Altitude
-                                currentaz = self.tel.Azimuth
+                                ref_tel_alt = self.tel.Altitude
+                                ref_tel_az = self.tel.Azimuth
+                                weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                                currentaz = ref_tel_az + weighted_avg_az_sep
+                                currentalt = ref_tel_alt + weighted_avg_alt_sep
                                 #Check to make sure these aren't stale coordinates from the telescope
                                 telaltmovement = abs(currentalt - self.lastalt)
                                 telazmovement = abs(currentaz - self.lastaz)
                                 staletelcoords = False
-                                if telaltmovement + telazmovement < 0.1:
-                                    #It's stale so don't make corrections, just use the current interpolated alt/az rate
+                                #This PROBABLY still works, but need to test it to make sure I'm not mistaking random noise for non-stale coordinates
+                                if telaltmovement + telazmovement < 0.0001:
+                                    #It's stale so don't make corrections, just use the current interpolated alt/az rate - UNLESS PREDICTION LOCK IS ON! If prediction lock is on, using the current interpolated rate will quickly override prediction corrections, so don't issue a new command if that's the case - check for that at the time you send the command
                                     azrate = float(self.azrateout)
                                     altrate = float(self.altrateout)
                                     staletelcoords = True
@@ -2028,15 +2762,27 @@ class buttons:
                                     #Only save the current alt/az when the coordinates aren't stale to compare later
                                     self.lastalt = currentalt
                                     self.lastaz = currentaz
-                                    predictiontplus = (currentpredictiontime - trackSettings.launchtime).total_seconds()  # the point in time between current_time and next_time
+                                    predictiontplus = (currentpredictiontime - trackSettings.launchtime).total_seconds()  # the point in time between current_time and initial time
                                     if self.nextpredicttime-self.currentpredicttime > 0:
                                         interpolatedalt = self.predictalt + (predictiontplus-self.currentpredicttime)*((self.nextpredictedalt-self.predictalt)/(self.nextpredicttime-self.currentpredicttime))
+                                        #We NEED to handle crossing the north meridian!
+                                        #check if we're crossing north meridian and correct if so
+                                        headingwestaz = self.nextpredictedaz - (self.predictaz+360)
+                                        headingeastaz = (self.nextpredictedaz+360) - self.predictaz
+                                        diffinaz = self.nextpredictedaz - self.predictaz
+                                        if abs(headingwestaz) < abs(diffinaz):
+                                            self.predictaz+=360
+                                        if abs(headingeastaz) < abs(diffinaz):
+                                            self.nextpredictedaz+=360
                                         interpolatedaz = self.predictaz + (predictiontplus-self.currentpredicttime)*((self.nextpredictedaz-self.predictaz)/(self.nextpredicttime-self.currentpredicttime))
                                         predictaltdiff = interpolatedalt - currentalt
                                         predictazdiff = interpolatedaz - currentaz
+                                        if predictazdiff < -180:
+                                            predictazdiff += 360
+                                        elif predictazdiff > 180:
+                                            predictazdiff -= 360
                                         azrate = (predictazdiff*trackSettings.aggression) + float(self.azrateout)
                                         altrate = (predictaltdiff*trackSettings.aggression) + float(self.altrateout)
-
                                     else:
                                         continue
                                 #self.azdifflist.append(predictazdiff)
@@ -2053,8 +2799,11 @@ class buttons:
                                 #    altrate = float(self.altrateout) + (0.000001*random.randrange(0, 5, 1))
                         else:
                             launchobserver.date = datetime.datetime.utcnow()
-                            currentaz = self.tel.Azimuth
-                            currentalt = self.tel.Altitude
+                            ref_tel_alt = self.tel.Altitude
+                            ref_tel_az = self.tel.Azimuth
+                            weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                            currentaz = ref_tel_az + weighted_avg_az_sep
+                            currentalt = ref_tel_alt + weighted_avg_alt_sep
                             currentaltdegrees = currentalt
                             currentazdegrees = currentaz
                             altspiralrate = self.spiralalt - currentaltdegrees
@@ -2112,14 +2861,30 @@ class buttons:
                             print(poop)
                             pass
                         #if holdrate is False:
-                        if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
-                            self.tel.MoveAxis(0, azrate)
-                            commandedazratelast = azrate
-                        if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
-                            self.tel.MoveAxis(1, altrate)
-                            commandedaltratelast = altrate
-                        azratelast = azrate
-                        altratelast = altrate
+                        #Check command rate and issue command if enough time has passed
+                        currentcommandtime = datetime.datetime.utcnow()
+                        commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                        if commandtimediff > 0.1:
+                            if abs(abs(commandedazratelast) - abs(azrate)) > 0.00001:
+                                #Watch out for stale coordinates plus prediction lock
+                                if trackSettings.predictionLock is True and staletelcoords is True:
+                                    pass
+                                else:
+                                    #If we sent a command, update the last commanded time
+                                    self.tlastcommand = datetime.datetime.utcnow()
+                                    self.tel.MoveAxis(0, azrate)
+                                    commandedazratelast = azrate
+                            if abs(abs(commandedaltratelast) - abs(altrate)) > 0.00001:
+                                #Watch out for stale coordinates plus prediction lock
+                                if trackSettings.predictionLock is True and staletelcoords is True:
+                                    pass
+                                else:
+                                    #If we sent a command, update the last commanded time
+                                    self.tlastcommand = datetime.datetime.utcnow()
+                                    self.tel.MoveAxis(1, altrate)
+                                    commandedaltratelast = altrate
+                            azratelast = azrate
+                            altratelast = altrate
                         #else:
                         #    self.tel.MoveAxis(0, azratelast)
                         #    self.tel.MoveAxis(1, altratelast)
@@ -2452,8 +3217,11 @@ class buttons:
                     time.sleep(0.01)
                     d = datetime.datetime.utcnow()
                     if trackSettings.mounttype == 'AltAz':
-                        currentaz = self.tel.Azimuth
-                        currentalt = self.tel.Altitude
+                        ref_tel_alt = self.tel.Altitude
+                        ref_tel_az = self.tel.Azimuth
+                        weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                        currentaz = ref_tel_az + weighted_avg_az_sep
+                        currentalt = ref_tel_alt + weighted_avg_alt_sep
                         currentaltdegrees = currentalt
                         currentazdegrees = currentaz
                         if self.dnow > self.dlast:
@@ -2574,14 +3342,20 @@ class buttons:
                                     altrate = self.axis1rate
                                 if altrate < (-1*self.axis1rate):
                                     altrate = (-1*self.axis1rate)
-                            if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
-                                self.tel.MoveAxis(0, azrate)
-                                commandedazratelast = azrate
-                            if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
-                                self.tel.MoveAxis(1, altrate)
-                                commandedaltratelast = altrate
-                            azratelast = azrate
-                            altratelast = altrate
+                            #Check command rate and issue command if enough time has passed
+                            currentcommandtime = datetime.datetime.utcnow()
+                            commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                            if commandtimediff > 0.1:
+                                #If we sent a command, update the last commanded time
+                                self.tlastcommand = datetime.datetime.utcnow()
+                                if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
+                                    self.tel.MoveAxis(0, azrate)
+                                    commandedazratelast = azrate
+                                if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
+                                    self.tel.MoveAxis(1, altrate)
+                                    commandedaltratelast = altrate
+                                azratelast = azrate
+                                altratelast = altrate
                             if trackSettings.foundtarget is True:
                                 self.az = self.az2
                                 self.alt = self.alt2
@@ -2779,19 +3553,31 @@ class buttons:
                             azrate = 0.0
                             altrate = 0.0
                         if holdrate is False:
-                            if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
-                                self.tel.MoveAxis(0, azrate)
-                                commandedazratelast = azrate
-                            if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
-                                self.tel.MoveAxis(1, altrate)
-                                commandedaltratelast = altrate
-                            azratelast = azrate
-                            altratelast = altrate
+                            #Check command rate and issue command if enough time has passed
+                            currentcommandtime = datetime.datetime.utcnow()
+                            commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                            if commandtimediff > 0.1:
+                                #If we sent a command, update the last commanded time
+                                self.tlastcommand = datetime.datetime.utcnow()
+                                if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
+                                    self.tel.MoveAxis(0, azrate)
+                                    commandedazratelast = azrate
+                                if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
+                                    self.tel.MoveAxis(1, altrate)
+                                    commandedaltratelast = altrate
+                                azratelast = azrate
+                                altratelast = altrate
                             rateheld = False
                         else:
                             if rateheld is False:
-                                self.tel.MoveAxis(0, azratelast)
-                                self.tel.MoveAxis(1, altratelast)
+                                #Check command rate and issue command if enough time has passed
+                                currentcommandtime = datetime.datetime.utcnow()
+                                commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                                if commandtimediff > 0.1:
+                                    #If we sent a command, update the last commanded time
+                                    self.tlastcommand = datetime.datetime.utcnow()
+                                    self.tel.MoveAxis(0, azratelast)
+                                    self.tel.MoveAxis(1, altratelast)
                             rateheld = True
                         altcorrect = 0
                         azcorrect = 0
@@ -2854,19 +3640,31 @@ class buttons:
                         azrate = azrate + (0.001*random.randrange(0, 5, 1))
                         altrate = altrate + (0.001*random.randrange(0, 5, 1))
                         if holdrate is False:
-                            if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
-                                self.tel.MoveAxis(0, azrate)
-                                commandedazratelast = azrate
-                            if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
-                                self.tel.MoveAxis(1, altrate)
-                                commandedaltratelast = altrate
-                            azratelast = azrate
-                            altratelast = altrate
+                            #Check command rate and issue command if enough time has passed
+                            currentcommandtime = datetime.datetime.utcnow()
+                            commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                            if commandtimediff > 0.1:
+                                #If we sent a command, update the last commanded time
+                                self.tlastcommand = datetime.datetime.utcnow()
+                                if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
+                                    self.tel.MoveAxis(0, azrate)
+                                    commandedazratelast = azrate
+                                if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
+                                    self.tel.MoveAxis(1, altrate)
+                                    commandedaltratelast = altrate
+                                azratelast = azrate
+                                altratelast = altrate
                             rateheld = False
                         else:
                             if rateheld is False:
-                                self.tel.MoveAxis(0, azratelast)
-                                self.tel.MoveAxis(1, altratelast)
+                                #Check command rate and issue command if enough time has passed
+                                currentcommandtime = datetime.datetime.utcnow()
+                                commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                                if commandtimediff > 0.1:
+                                    #If we sent a command, update the last commanded time
+                                    self.tlastcommand = datetime.datetime.utcnow()
+                                    self.tel.MoveAxis(0, azratelast)
+                                    self.tel.MoveAxis(1, altratelast)
                             rateheld = True
                         altcorrect = 0
                         azcorrect = 0
@@ -3309,8 +4107,11 @@ class buttons:
                     time.sleep(0.01)
                     d = datetime.datetime.utcnow()
                     if trackSettings.mounttype == 'AltAz':
-                        currentaz = self.tel.Azimuth
-                        currentalt = self.tel.Altitude
+                        ref_tel_alt = self.tel.Altitude
+                        ref_tel_az = self.tel.Azimuth
+                        weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                        currentaz = ref_tel_az + weighted_avg_az_sep
+                        currentalt = ref_tel_alt + weighted_avg_alt_sep
                         currentaltdegrees = currentalt
                         currentazdegrees = currentaz
                         if self.dnow > self.dlast:
@@ -3430,14 +4231,20 @@ class buttons:
                                     altrate = self.axis1rate
                                 if altrate < (-1*self.axis1rate):
                                     altrate = (-1*self.axis1rate)
-                            if abs(abs(commandedazratelast) - abs(azrate)) > 0.001:
-                                self.tel.MoveAxis(0, azrate)
-                                commandedazratelast = azrate
-                            if abs(abs(commandedaltratelast) - abs(altrate)) > 0.001:
-                                self.tel.MoveAxis(1, altrate)
-                                commandedaltratelast = altrate
-                            azratelast = azrate
-                            altratelast = altrate
+                            #Check command rate and issue command if enough time has passed
+                            currentcommandtime = datetime.datetime.utcnow()
+                            commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                            if commandtimediff > 0.1:
+                                #If we sent a command, update the last commanded time
+                                self.tlastcommand = datetime.datetime.utcnow()
+                                if abs(abs(commandedazratelast) - abs(azrate)) > 0.0001:
+                                    self.tel.MoveAxis(0, azrate)
+                                    commandedazratelast = azrate
+                                if abs(abs(commandedaltratelast) - abs(altrate)) > 0.0001:
+                                    self.tel.MoveAxis(1, altrate)
+                                    commandedaltratelast = altrate
+                                azratelast = azrate
+                                altratelast = altrate
                             if trackSettings.foundtarget is True:
                                 self.az = self.az2
                                 self.alt = self.alt2
@@ -3483,8 +4290,14 @@ class buttons:
                                     decrate = self.axis1rate
                                 if decrate < (-1*self.axis1rate):
                                     decrate = (-1*self.axis1rate)
-                                self.tel.MoveAxis(0, rarate)
-                                self.tel.MoveAxis(1, decrate)
+                                #Check command rate and issue command if enough time has passed
+                                currentcommandtime = datetime.datetime.utcnow()
+                                commandtimediff = (currentcommandtime - self.tlastcommand).total_seconds()
+                                if commandtimediff > 0.1:
+                                    #If we sent a command, update the last commanded time
+                                    self.tlastcommand = datetime.datetime.utcnow()
+                                    self.tel.MoveAxis(0, rarate)
+                                    self.tel.MoveAxis(1, decrate)
                                 self.diffralast = radiff
                                 self.diffdeclast = decdiff
                             except:
@@ -3622,7 +4435,7 @@ class buttons:
             time.sleep(0.005)
         #stop moving the telescope if the user is on ASCOM and requested stop tracking.
         if trackSettings.telescopetype == 'ASCOM' and trackSettings.joytracking is False:
-            self.tel.AbortSlew
+            self.tel.AbortSlew()
     
     def set_center(self):
         trackSettings.setcenter = True
@@ -3693,12 +4506,50 @@ class buttons:
             self.resphours = ((((self.sec/60)+self.min)/60)+self.hr)*15
         return
     
+    def read_all_bytes(self):
+        bytesToRead = self.ser.inWaiting()
+        while bytesToRead == 0:
+            bytesToRead = self.ser.inWaiting()
+        self.resp = self.ser.read()
+        self.resp = self.resp.decode("utf-8", errors="ignore")
+        bytesToRead = self.ser.inWaiting()
+        try:
+            while bytesToRead > 0:
+                self.resp += self.ser.read().decode("utf-8", errors="ignore")
+                bytesToRead = self.ser.inWaiting()
+        except:
+            print('Unable to read line')
+            self.textbox.insert(END, 'Unable to read line.\n')
+            self.textbox.see('end')
+        responsestr = self.resp
+        return(responsestr)
+    
     def set_tracking(self):
         if trackSettings.tracking is False:
             trackSettings.tracking = True
             print('Connecting to Scope.')
             self.textbox.insert(END, 'Connecting to Scope.\n')
             self.textbox.see('end')
+            if trackSettings.telescopetype == 'ioptron':
+                try:
+                    self.axis0rate = 8
+                    self.axis1rate = 6
+                    self.comport = str('COM'+str(self.entryCom.get()))
+                    self.ser = serial.Serial(self.comport, baudrate=115200, timeout=1, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE, xonxoff=False, rtscts=False)
+                    #Put the mount in special mode if it wasn't already
+                    self.ser.write(str.encode(':MountInfo#'))
+                    responsestr = self.read_all_bytes()
+                    print(responsestr)
+                    if responsestr not in trackSettings.ioptronspecialmoderesponses:
+                        self.ser.write(str.encode(':ZZZ#'))
+                    self.serialconnected = True
+                    self.startButton5.configure(text='Disconnect Scope')
+                except:
+                    print('Failed to connect on ' + self.comport)
+                    self.textbox.insert(END, str('Failed to connect on ' + str(self.comport) + '\n'))
+                    self.textbox.see('end')
+                    trackSettings.tracking = False
+                    return
             if trackSettings.telescopetype == 'LX200':
                 try:
                     self.axis0rate = 16
@@ -3789,6 +4640,15 @@ class buttons:
                 self.ser.write(str.encode(':U#'))
                 self.ser.close()
                 self.serialconnected = False
+            elif trackSettings.telescopetype == 'ioptron' and self.serialconnected is True:
+                #Set back to normal mode before disconnecting
+                self.ser.write(str.encode(':MountInfo#'))
+                responsestr = self.read_all_bytes()
+                print(responsestr)
+                if responsestr in trackSettings.ioptronspecialmoderesponses:
+                    self.ser.write(str.encode(':ZZZ#'))
+                self.ser.close()
+                self.serialconnected = False
             elif trackSettings.telescopetype == 'ASCOM':
                 self.tel.AbortSlew()
                 self.tel.Connected = False
@@ -3827,7 +4687,7 @@ class buttons:
         else:
             if trackSettings.telescopetype == 'ASCOM':
                 self.tel.MoveAxis(1, 0.0)
-                #self.tel.AbortSlew()
+                self.tel.AbortSlew()
             trackSettings.calibratestart = False
         if trackSettings.tracking is False:
             print('Connect the Scope First!')
@@ -3860,23 +4720,33 @@ class buttons:
         if trackSettings.tracking is True and self.collect_images is True and trackSettings.objectfollow is True and trackSettings.calibratestart is True and speedset is True:
             if trackSettings.telescopetype == 'ASCOM':
                 if trackSettings.mounttype == 'AltAz':
-                    self.X1 = math.radians(self.tel.Azimuth)
-                    self.Y1 = math.radians(self.tel.Altitude)
+                    ref_tel_alt = self.tel.Altitude
+                    ref_tel_az = self.tel.Azimuth
+                    weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                    currentaz = ref_tel_az + weighted_avg_az_sep
+                    currentalt = ref_tel_alt + weighted_avg_alt_sep
+                    self.X1 = math.radians(currentaz)
+                    self.Y1 = math.radians(currentalt)
                     startx = self.targetX
                     starty = self.targetY
                     if starty < (self.height/2):
                         distmoved = 0
                         self.tel.MoveAxis(1, trackSettings.calspeed)
                         while distmoved < 100 and trackSettings.calibratestart is True:
-                            self.tel.MoveAxis(1, trackSettings.calspeed)
+                            #self.tel.MoveAxis(1, trackSettings.calspeed)
                             currentx = self.targetX
                             currenty = self.targetY
                             distmoved = math.sqrt((startx-currentx)**2+(starty-currenty)**2)
                             time.sleep(0.01)
                         self.tel.MoveAxis(1, 0.0)
-                        #self.tel.AbortSlew()
-                        self.X2 = math.radians(self.tel.Azimuth)
-                        self.Y2 = math.radians(self.tel.Altitude)
+                        self.tel.AbortSlew()
+                        ref_tel_alt = self.tel.Altitude
+                        ref_tel_az = self.tel.Azimuth
+                        weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                        currentaz = ref_tel_az + weighted_avg_az_sep
+                        currentalt = ref_tel_alt + weighted_avg_alt_sep
+                        self.X2 = math.radians(currentaz)
+                        self.Y2 = math.radians(currentalt)
                         self.separation_between_coordinates()
                         self.imagescale = self.separation/distmoved
                         print(self.imagescale, ' degrees per pixel.')
@@ -3886,15 +4756,20 @@ class buttons:
                         distmoved = 0
                         self.tel.MoveAxis(1, (-1*trackSettings.calspeed))
                         while distmoved < 100 and trackSettings.calibratestart is True:
-                            self.tel.MoveAxis(1, (-1*trackSettings.calspeed))
+                            #self.tel.MoveAxis(1, (-1*trackSettings.calspeed))
                             currentx = self.targetX
                             currenty = self.targetY
                             distmoved = math.sqrt((startx-currentx)**2+(starty-currenty)**2)
                             time.sleep(0.01)
                         self.tel.MoveAxis(1, 0.0)
-                        #self.tel.AbortSlew()
-                        self.X2 = math.radians(self.tel.Azimuth)
-                        self.Y2 = math.radians(self.tel.Altitude)
+                        self.tel.AbortSlew()
+                        ref_tel_alt = self.tel.Altitude
+                        ref_tel_az = self.tel.Azimuth
+                        weighted_avg_alt_sep, weighted_avg_az_sep = self.errorWeightedAverage(ref_tel_alt, ref_tel_az)
+                        currentaz = ref_tel_az + weighted_avg_az_sep
+                        currentalt = ref_tel_alt + weighted_avg_alt_sep
+                        self.X2 = math.radians(currentaz)
+                        self.Y2 = math.radians(currentalt)
                         self.separation_between_coordinates()
                         self.imagescale = self.separation/distmoved
                         print(self.imagescale, ' degrees per pixel.')
@@ -3909,13 +4784,13 @@ class buttons:
                         distmoved = 0
                         self.tel.MoveAxis(1, trackSettings.calspeed)
                         while distmoved < 100 and trackSettings.calibratestart is True:
-                            self.tel.MoveAxis(1, trackSettings.calspeed)
+                            #self.tel.MoveAxis(1, trackSettings.calspeed)
                             currentx = self.targetX
                             currenty = self.targetY
                             distmoved = math.sqrt((startx-currentx)**2+(starty-currenty)**2)
                             time.sleep(0.01)
                         self.tel.MoveAxis(1, 0.0)
-                        #self.tel.AbortSlew()
+                        self.tel.AbortSlew()
                         self.X2 = math.radians(self.tel.RightAscension*15)
                         self.Y2 = math.radians(self.tel.Declination)
                         self.separation_between_coordinates()
@@ -3928,13 +4803,13 @@ class buttons:
                         distmoved = 0
                         self.tel.MoveAxis(1, (-1*trackSettings.calspeed))
                         while distmoved < 100 and trackSettings.calibratestart is True:
-                            self.tel.MoveAxis(1, (-1*trackSettings.calspeed))
+                            #self.tel.MoveAxis(1, (-1*trackSettings.calspeed))
                             currentx = self.targetX
                             currenty = self.targetY
                             distmoved = math.sqrt((startx-currentx)**2+(starty-currenty)**2)
                             time.sleep(0.01)
                         self.tel.MoveAxis(1, 0.0)
-                        #self.tel.AbortSlew()
+                        self.tel.AbortSlew()
                         self.X2 = math.radians(self.tel.RightAscension*15)
                         self.Y2 = math.radians(self.tel.Declination)
                         self.separation_between_coordinates()
@@ -4092,7 +4967,7 @@ class buttons:
         print(trackSettings.boxSize)
         self.textbox.insert(END, str('Tracking box size: '+str(trackSettings.boxSize)+'\n'))
         self.textbox.see('end')
-    
+
     def mouse_position(self, event):
         trackSettings.mousecoords = (event.x, event.y)
     
@@ -4119,7 +4994,7 @@ class buttons:
             self.targetX = self.roibox[0][0]+(self.roiwidth/2)
             self.targetY = self.roibox[0][1]+(self.roiheight/2)
             self.roiboxlast = self.roibox
-            self.dnow = datetime.datetime.now()
+            self.dnow = datetime.datetime.utcnow()
             self.dlast = self.dnow - datetime.timedelta(seconds=0.01)
             #find brightness of the clicked pixel and use the median between that and the brightest pixel in the ROI as the threshhold cutoff for brightness
             trackSettings.clickpixel = self.img[trackSettings.mousecoords[1],trackSettings.mousecoords[0]]
@@ -4180,7 +5055,7 @@ class buttons:
                     self.img = cv2.flip(self.img, -1)
                 self.img = imutils.rotate(self.img, trackSettings.rotate)                        
                 #remember current time of the frame
-                self.dnow = datetime.datetime.now()
+                self.dnow = datetime.datetime.utcnow()
                 self.height, self.width = self.img.shape[:2]
                 self.datetimestring = str(self.dnow.strftime('%m%d%Y%H%M%S'))
                 self.displayimg.bind("<MouseWheel>", self._on_mousewheel)
