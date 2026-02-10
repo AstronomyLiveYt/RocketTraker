@@ -324,6 +324,7 @@ class buttons:
         return(fullycorrectedRA, fullycorrectedDec)
     
     def __init__(self, master):
+        self.master = master
         trackSettings.screen_width = root.winfo_screenwidth()
         trackSettings.screen_height = root.winfo_screenheight()
         self.starmapsize = round(trackSettings.screen_height*0.6)
@@ -347,6 +348,7 @@ class buttons:
         self.new_msg = True
         
         self.collect_images = False
+        self._after_id = None
         self.topframe = Frame(master)
         master.winfo_toplevel().title("RocketTraker")
         self.topframe.pack(side=TOP)
@@ -1433,7 +1435,7 @@ class buttons:
             self.raslew = raslew
             self.decslew = decslew
             trackSettings.goforSlew = True
-            self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+            self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
             self.ASCOMSlewThread.start()
             #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
             
@@ -1445,7 +1447,7 @@ class buttons:
         if trackSettings.renderStarMap is False:
             trackSettings.renderStarMap = True
             self.renderMapButton.configure(text='Pause All Sky View')
-            self.renderMapThread = threading.Thread(target=self.render_starMap)
+            self.renderMapThread = threading.Thread(target=self.render_starMap, daemon=True)
             self.renderMapThread.start()
         else:
             self.renderMapButton.configure(text='Render All Sky View')
@@ -1553,7 +1555,7 @@ class buttons:
                 self.host = socket.gethostbyname(self.entryIP.get())
                 self.remotejoystick.connect((self.host, 3933))
                 trackSettings.joystickconnected = True
-                self.get_remote_joy_data = threading.Thread(target=self.get_joy)
+                self.get_remote_joy_data = threading.Thread(target=self.get_joy, daemon=True)
                 self.get_remote_joy_data.start()
                 self.remotejoyButton.configure(text="Remote Joystick Connected")
             except Exception as e:
@@ -1619,7 +1621,7 @@ class buttons:
                 self.host = socket.gethostbyname(self.entryIP.get())
                 self.remotejoystick.connect((self.host, 3933))
                 trackSettings.joystickconnected = True
-                self.get_remote_joy_data = threading.Thread(target=self.get_joy)
+                self.get_remote_joy_data = threading.Thread(target=self.get_joy, daemon=True)
                 self.get_remote_joy_data.start()
                 
     def chup(self, event):
@@ -1659,6 +1661,12 @@ class buttons:
         trackSettings.rotate = 180
         
     def exitProg(self):
+        if getattr(self, '_after_id', None) is not None:
+            try:
+                self.master.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
         config = open('rocketconfig.txt','w')
         config.write(str(trackSettings.telescopetype)+'\n')
         config.write(str(self.entryCom.get()) + '\n')
@@ -1694,9 +1702,17 @@ class buttons:
         config.write(str(trackSettings.aggression) + '\n')
         config.write(str(trackSettings.screenshrink) + '\n')
         config.close()
-        if self.recordvideo.get() == 1:
+        if getattr(self, 'cap', None) is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+        cv2.destroyAllWindows()
+        if getattr(self, 'recordvideo', None) and self.recordvideo.get() == 1:
             self.out.release()
-        sys.exit()
+        self.master.quit()
+        self.master.destroy()
+        sys.exit(0)
     
     def start_spiral_search(self):
         if trackSettings.spiralSearch is False:
@@ -1732,9 +1748,9 @@ class buttons:
             else:
                 if trackSettings.joystickconnected is False:
                     self.joysticks[0].init()
-                self.simcalc = threading.Thread(target=self.run_sim)
+                self.simcalc = threading.Thread(target=self.run_sim, daemon=True)
                 self.simcalc.start()
-                self.simthread = threading.Thread(target=self.simulate_launch)
+                self.simthread = threading.Thread(target=self.simulate_launch, daemon=True)
                 self.simulateButton.configure(text='Stop Simulation')
                 self.simthread.start()
             
@@ -1755,9 +1771,9 @@ class buttons:
             else:
                 if trackSettings.joystickconnected is False:
                     self.joysticks[0].init()
-                self.simcalc = threading.Thread(target=self.simulate_launch)
+                self.simcalc = threading.Thread(target=self.simulate_launch, daemon=True)
                 self.simcalc.start()
-                self.launchthread = threading.Thread(target=self.run_launch)
+                self.launchthread = threading.Thread(target=self.run_launch, daemon=True)
                 self.launchButton.configure(text='Disarm Launch Tracking')
                 self.launchthread.start()
         elif trackSettings.fileSelected is False:
@@ -1877,7 +1893,7 @@ class buttons:
                         self.raslew = raslew
                         self.decslew = decslew
                         trackSettings.goforSlew = True
-                        self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+                        self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
                         self.ASCOMSlewThread.start()
                         #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
                         while trackSettings.slewCompleted is False:
@@ -2003,7 +2019,7 @@ class buttons:
                             trackSettings.feedingdata = False
                             self.launchButton.configure(text='Arm Launch Tracking')
                             trackSettings.joytracking = True
-                            self.trackthread = threading.Thread(target=self.track)
+                            self.trackthread = threading.Thread(target=self.track, daemon=True)
                             self.startButton4.configure(text='Stop Joystick Tracking')
                             self.trackthread.start()
                         if math.isinf(altrate) or math.isinf(azrate):
@@ -2059,7 +2075,7 @@ class buttons:
                                 self.raslew = raslew
                                 self.decslew = decslew
                                 trackSettings.goforSlew = True
-                                self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew)
+                                self.ASCOMSlewThread = threading.Thread(target=self.ASCOMSlew, daemon=True)
                                 self.ASCOMSlewThread.start()
                                 #self.tel.SlewToCoordinates((math.degrees(raslew)/15),math.degrees(decslew))
                                 while trackSettings.slewCompleted is False:
@@ -2209,7 +2225,7 @@ class buttons:
                         trackSettings.feedingdata = False
                         self.launchButton.configure(text='Arm Launch Tracking')
                         trackSettings.joytracking = True
-                        self.trackthread = threading.Thread(target=self.track)
+                        self.trackthread = threading.Thread(target=self.track, daemon=True)
                         self.startButton4.configure(text='Stop Joystick Tracking')
                         self.trackthread.start()
                     if math.isinf(altrate) or math.isinf(azrate):
@@ -2340,7 +2356,7 @@ class buttons:
                     trackSettings.feedingdata = False
                     self.launchButton.configure(text='Arm Launch Tracking')
                     trackSettings.joytracking = True
-                    self.trackthread = threading.Thread(target=self.track)
+                    self.trackthread = threading.Thread(target=self.track, daemon=True)
                     self.startButton4.configure(text='Stop Joystick Tracking')
                     self.trackthread.start()
                 if math.isinf(altrate) or math.isinf(azrate):
@@ -2421,7 +2437,7 @@ class buttons:
                 trackSettings.feedingdata = False
                 self.simulateButton.configure(text='Simulate Launch')
                 trackSettings.joytracking = True
-                self.trackthread = threading.Thread(target=self.track)
+                self.trackthread = threading.Thread(target=self.track, daemon=True)
                 self.startButton4.configure(text='Stop Joystick Tracking')
                 self.trackthread.start()
             if math.isinf(altrate) or math.isinf(azrate):
@@ -3393,7 +3409,7 @@ class buttons:
         elif len(self.joysticks) > 0 and trackSettings.joystickconnected is False:
             self.joysticks[0].init()
         if trackSettings.tracking is True and self.collect_images is True and trackSettings.joytracking is True:
-            self.trackthread = threading.Thread(target=self.track)
+            self.trackthread = threading.Thread(target=self.track, daemon=True)
             self.startButton4.configure(text='Stop Joystick Tracking')
             self.trackthread.start()
         
@@ -4483,7 +4499,7 @@ class buttons:
             self.cap = cv2.VideoCapture(int(self.entryCam.get()))
             self.displayimg = Label(self.topframe, bg="black")
             self.startButton.configure(text='Stop Camera')
-            imagethread = threading.Thread(target=self.prepare_img_for_tkinter)
+            imagethread = threading.Thread(target=self.prepare_img_for_tkinter, daemon=True)
             imagethread.start()
         else:
             self.cap.release()
@@ -4686,7 +4702,7 @@ class buttons:
         self.dec_s = (((abs(self.decdeg) - abs(self.dec_d))*60) - abs(self.dec_m))*60
     
     def start_calibration(self):
-        calibthread = threading.Thread(target=self.set_calibration)
+        calibthread = threading.Thread(target=self.set_calibration, daemon=True)
         calibthread.start()
     
     def set_calibration(self):
@@ -5140,7 +5156,7 @@ class buttons:
                 self.displayimg.config(image=self.tkimg)
                 self.displayimg.img = self.tkimg
                 self.displayimg.grid(row = 0, column = 0)
-            After = root.after(10,self.prepare_img_for_tkinter)
+            self._after_id = root.after(10, self.prepare_img_for_tkinter)
         else:
             print('Stopping Camera.')
             self.textbox.insert(END, str('Stopping Camera.\n'))
@@ -5149,4 +5165,5 @@ class buttons:
 After = None
 root = Tk()
 b = buttons(root)
+root.protocol("WM_DELETE_WINDOW", b.exitProg)
 root.mainloop()
